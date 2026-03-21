@@ -4,6 +4,8 @@ from graphql_api.schema.resolvers.analytics import AnalyticsQuery
 from graphql_api.schema.resolvers.articles import ArticleQuery
 from graphql_api.schema.resolvers.clippings import ClippingMutation, ClippingQuery
 from graphql_api.schema.resolvers.health import HealthQuery
+from graphql_api.schema.resolvers.internal_mutations import InternalMutation
+from graphql_api.schema.resolvers.internal_queries import InternalQuery
 from graphql_api.schema.resolvers.marketplace import MarketplaceMutation, MarketplaceQuery
 from graphql_api.schema.resolvers.metadata import MetadataQuery
 from graphql_api.schema.resolvers.push import PushMutation
@@ -21,12 +23,13 @@ class Query(
     ClippingQuery,
     MarketplaceQuery,
     WidgetQuery,
+    InternalQuery,
 ):
     pass
 
 
 @strawberry.type
-class Mutation(ClippingMutation, MarketplaceMutation, PushMutation):
+class Mutation(ClippingMutation, MarketplaceMutation, PushMutation, InternalMutation):
     pass
 
 

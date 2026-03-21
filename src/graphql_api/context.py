@@ -5,7 +5,9 @@ from strawberry.fastapi import BaseContext
 
 if TYPE_CHECKING:
     from graphql_api.datasources.firestore import FirestoreDatasource
+    from graphql_api.datasources.postgres import PostgresDatasource
     from graphql_api.datasources.typesense import TypesenseDatasource
+    from graphql_api.datasources.typesense_admin import TypesenseAdminDatasource
 
 
 @dataclass
@@ -26,12 +28,16 @@ class GraphQLContext(BaseContext):
         self,
         typesense_ds: Optional["TypesenseDatasource"] = None,
         firestore_ds: Optional["FirestoreDatasource"] = None,
+        postgres_ds: Optional["PostgresDatasource"] = None,
+        typesense_admin_ds: Optional["TypesenseAdminDatasource"] = None,
     ):
         super().__init__()
         self.user: Optional[User] = None
         self.service_account: Optional[ServiceAccount] = None
         self.typesense_ds = typesense_ds
         self.firestore_ds = firestore_ds
+        self.postgres_ds = postgres_ds
+        self.typesense_admin_ds = typesense_admin_ds
 
     @property
     def is_authenticated(self) -> bool:
