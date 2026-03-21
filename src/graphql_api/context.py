@@ -1,7 +1,10 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from strawberry.fastapi import BaseContext
+
+if TYPE_CHECKING:
+    from graphql_api.datasources.typesense import TypesenseDatasource
 
 
 @dataclass
@@ -18,10 +21,11 @@ class ServiceAccount:
 
 
 class GraphQLContext(BaseContext):
-    def __init__(self):
+    def __init__(self, typesense_ds: Optional["TypesenseDatasource"] = None):
         super().__init__()
         self.user: Optional[User] = None
         self.service_account: Optional[ServiceAccount] = None
+        self.typesense_ds = typesense_ds
 
     @property
     def is_authenticated(self) -> bool:
