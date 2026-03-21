@@ -33,6 +33,33 @@ class NewsRecord:
 
 
 @dataclass
+class BigQueryRecord(NewsRecord):
+    sentiment_label: Optional[str] = None
+    sentiment_score: Optional[float] = None
+    trending_score: Optional[float] = None
+    word_count: Optional[int] = None
+    has_image: Optional[bool] = None
+    has_video: Optional[bool] = None
+    image_broken: Optional[bool] = None
+    readability_flesch: Optional[float] = None
+
+
+@dataclass
+class SimilarArticleRecord:
+    unique_id: str
+    similarity: float
+
+
+@dataclass
+class IntegrityCandidateRecord:
+    unique_id: str
+    url: str
+    image_url: Optional[str] = None
+    published_at: Optional[datetime] = None
+    integrity: Optional[dict[str, Any]] = None
+
+
+@dataclass
 class TypesenseDocRecord(NewsRecord):
     content_embedding: Optional[list[float]] = None
     sentiment_label: Optional[str] = None
@@ -66,6 +93,49 @@ LEFT JOIN themes t2 ON n.theme_l2_id = t2.id
 LEFT JOIN themes t3 ON n.theme_l3_id = t3.id
 LEFT JOIN themes tm ON n.most_specific_theme_id = tm.id
 LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
+"""
+
+_NEWS_BIGQUERY_SQL = """
+SELECT n.*,
+  t1.code as theme_l1_code, t1.label as theme_l1_label,
+  t2.code as theme_l2_code, t2.label as theme_l2_label,
+  t3.code as theme_l3_code, t3.label as theme_l3_label,
+  tm.code as most_specific_theme_code, tm.label as most_specific_theme_label,
+  nf.features
+FROM news n
+LEFT JOIN themes t1 ON n.theme_l1_id = t1.id
+LEFT JOIN themes t2 ON n.theme_l2_id = t2.id
+LEFT JOIN themes t3 ON n.theme_l3_id = t3.id
+LEFT JOIN themes tm ON n.most_specific_theme_id = tm.id
+LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
+WHERE n.published_at BETWEEN $1 AND $2
+"""
+
+_SIMILAR_ARTICLES_SQL = """
+SELECT n2.unique_id,
+  1 - (n1.content_embedding <=> n2.content_embedding) AS similarity
+FROM news n1, news n2
+WHERE n1.unique_id = $1
+  AND n2.unique_id != $1
+  AND 1 - (n1.content_embedding <=> n2.content_embedding) > $2
+ORDER BY similarity DESC
+LIMIT $3
+"""
+
+_INTEGRITY_BATCH_SQL = """
+SELECT n.unique_id, n.url, n.image_url, n.published_at,
+  nf.features->'integrity' AS integrity
+FROM news n
+LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
+WHERE n.published_at > NOW() - INTERVAL '5 months'
+  AND (
+    nf.features IS NULL
+    OR nf.features->'integrity' IS NULL
+    OR nf.features->'integrity'->>'checked_at' IS NULL
+    OR (nf.features->'integrity'->>'checked_at')::timestamptz < NOW() - INTERVAL '7 days'
+  )
+ORDER BY n.published_at DESC
+LIMIT $1
 """
 
 _NEWS_TYPESENSE_SQL = """
@@ -113,6 +183,67 @@ def _row_to_news_record(row: dict) -> NewsRecord:
         most_specific_theme_code=row.get("most_specific_theme_code"),
         most_specific_theme_label=row.get("most_specific_theme_label"),
         features=row.get("features"),
+    )
+
+
+def _row_to_bigquery_record(row: dict) -> BigQueryRecord:
+    tags = row.get("tags") or []
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+    features = row.get("features") or {}
+    return BigQueryRecord(
+        unique_id=row["unique_id"],
+        title=row["title"],
+        url=row["url"],
+        image_url=row.get("image_url"),
+        video_url=row.get("video_url"),
+        content=row.get("content"),
+        summary=row.get("summary"),
+        subtitle=row.get("subtitle"),
+        editorial_lead=row.get("editorial_lead"),
+        category=row.get("category"),
+        tags=tags,
+        agency_key=row.get("agency_key"),
+        agency_name=row.get("agency_name"),
+        published_at=row.get("published_at"),
+        extracted_at=row.get("extracted_at"),
+        theme_l1_code=row.get("theme_l1_code"),
+        theme_l1_label=row.get("theme_l1_label"),
+        theme_l2_code=row.get("theme_l2_code"),
+        theme_l2_label=row.get("theme_l2_label"),
+        theme_l3_code=row.get("theme_l3_code"),
+        theme_l3_label=row.get("theme_l3_label"),
+        most_specific_theme_code=row.get("most_specific_theme_code"),
+        most_specific_theme_label=row.get("most_specific_theme_label"),
+        features=features,
+        sentiment_label=features.get("sentiment_label"),
+        sentiment_score=features.get("sentiment_score"),
+        trending_score=features.get("trending_score"),
+        word_count=features.get("word_count"),
+        has_image=features.get("has_image"),
+        has_video=features.get("has_video"),
+        image_broken=features.get("image_broken"),
+        readability_flesch=features.get("readability_flesch"),
+    )
+
+
+def _row_to_similar_article(row: dict) -> SimilarArticleRecord:
+    return SimilarArticleRecord(
+        unique_id=row["unique_id"],
+        similarity=row["similarity"],
+    )
+
+
+def _row_to_integrity_candidate(row: dict) -> IntegrityCandidateRecord:
+    integrity = row.get("integrity")
+    if isinstance(integrity, str):
+        integrity = json.loads(integrity)
+    return IntegrityCandidateRecord(
+        unique_id=row["unique_id"],
+        url=row["url"],
+        image_url=row.get("image_url"),
+        published_at=row.get("published_at"),
+        integrity=integrity,
     )
 
 
@@ -185,6 +316,47 @@ class PostgresDatasource:
         if row is None:
             return None
         return _row_to_typesense_doc(dict(row))
+
+    async def get_news_batch_for_bigquery(
+        self,
+        start_date: str,
+        end_date: str,
+        batch_size: int = 100,
+        cursor: str | None = None,
+    ) -> list[BigQueryRecord]:
+        if cursor:
+            query = _NEWS_BIGQUERY_SQL + " AND n.unique_id > $3 ORDER BY n.unique_id LIMIT $4"
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(query, start_date, end_date, cursor, batch_size)
+        else:
+            query = _NEWS_BIGQUERY_SQL + " ORDER BY n.unique_id LIMIT $3"
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(query, start_date, end_date, batch_size)
+        return [_row_to_bigquery_record(dict(r)) for r in rows]
+
+    async def get_similar_articles(
+        self,
+        unique_id: str,
+        threshold: float = 0.8,
+        limit: int = 5,
+    ) -> list[SimilarArticleRecord]:
+        async with self._pool.acquire() as conn:
+            # Check if the source article has an embedding
+            has_embedding = await conn.fetchval(
+                "SELECT content_embedding IS NOT NULL FROM news WHERE unique_id = $1",
+                unique_id,
+            )
+            if not has_embedding:
+                return []
+            rows = await conn.fetch(_SIMILAR_ARTICLES_SQL, unique_id, threshold, limit)
+        return [_row_to_similar_article(dict(r)) for r in rows]
+
+    async def get_integrity_batch(
+        self, batch_size: int = 50
+    ) -> list[IntegrityCandidateRecord]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(_INTEGRITY_BATCH_SQL, batch_size)
+        return [_row_to_integrity_candidate(dict(r)) for r in rows]
 
     async def upsert_features(self, unique_id: str, features: dict) -> bool:
         features_json = json.dumps(features)
