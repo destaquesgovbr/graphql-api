@@ -14,7 +14,6 @@ mas o transport entre o cliente urql e o graphql-api passa a ser SSE
 from __future__ import annotations
 
 import json
-from typing import Iterable
 from urllib.parse import urlencode
 
 import httpx
@@ -24,7 +23,6 @@ from httpx import ASGITransport, AsyncClient
 
 from graphql_api.app import create_app, get_graphql_context
 from graphql_api.context import GraphQLContext, User
-
 
 # ---------------------------------------------------------------------------
 # Helpers
