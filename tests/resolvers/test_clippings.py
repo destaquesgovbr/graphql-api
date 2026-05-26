@@ -6,7 +6,11 @@ import strawberry
 from strawberry.test import BaseGraphQLTestClient
 
 from graphql_api.context import GraphQLContext, User
-from graphql_api.datasources.firestore import ClippingData
+from graphql_api.datasources.firestore import (
+    ClippingData,
+    MyClippingResult,
+    SubscriptionData,
+)
 from graphql_api.schema.resolvers.clippings import ClippingMutation, ClippingQuery
 from graphql_api.schema.resolvers.health import HealthQuery
 
@@ -50,14 +54,30 @@ def _sample_clipping_data(**overrides) -> ClippingData:
     return ClippingData(**defaults)
 
 
+def _sample_subscription(clipping_id: str = "clip-1", role: str = "author") -> SubscriptionData:
+    now = datetime(2024, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+    return SubscriptionData(
+        id=f"sub-{clipping_id}",
+        clipping_id=clipping_id,
+        user_id="user-123",
+        role=role,
+        delivery_channels={"email": True, "telegram": False, "push": False, "webhook": False},
+        extra_emails=[],
+        webhook_url="",
+        active=True,
+        subscribed_at=now,
+    )
+
+
 def _make_mock_firestore_ds():
     ds = MagicMock()
-    ds.get_clippings.return_value = [_sample_clipping_data()]
+    ds.get_my_clippings.return_value = [
+        MyClippingResult(clipping=_sample_clipping_data(), subscription=_sample_subscription())
+    ]
     ds.get_clipping.return_value = _sample_clipping_data()
     ds.create_clipping.return_value = _sample_clipping_data(id="clip-new")
     ds.update_clipping.return_value = _sample_clipping_data(name="Updated")
     ds.delete_clipping.return_value = True
-    ds.count_clippings.return_value = 1
     return ds
 
 
@@ -192,6 +212,7 @@ class TestClippingMutations:
         )
         assert result.errors is None, f"Errors: {result.errors}"
         assert result.data["deleteClipping"] is True
+        # Nova API: delete_clipping(user_id, clipping_id)
         mock_firestore_ds.delete_clipping.assert_called_once_with("user-123", "clip-1")
 
     def test_update_clipping_mutation(self, mock_firestore_ds):

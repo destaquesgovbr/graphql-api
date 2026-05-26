@@ -304,31 +304,29 @@ class TestStrawberryUsesPydanticModel:
 # 4. Datasource: integração — leitura via Pydantic.model_validate
 # ---------------------------------------------------------------------------
 class TestFirestoreDatasourceUsesPydantic:
-    """Comprova que o datasource transita por `model_validate` sem regressão."""
+    """Comprova que o datasource transita por `model_validate` sem regressão.
 
-    def _mock_db(self, docs):
-        db = MagicMock()
-        col = MagicMock()
-        user_doc = MagicMock()
-        clippings_col = MagicMock()
-        db.collection.return_value = col
-        col.document.return_value = user_doc
-        user_doc.collection.return_value = clippings_col
-        clippings_col.stream.return_value = iter(docs)
-        return db
+    Fase A2: agora usa coleções top-level (`clippings/`, `subscriptions/`)
+    via o FakeFirestore exposto em `tests.datasources.test_firestore`.
+    """
 
     def test_datasource_returns_clipping_data_from_camelcase_doc(self):
-        doc = MagicMock()
-        doc.id = "clip-camel"
-        doc.exists = True
-        doc.to_dict.return_value = _camel_clipping_doc()
-        db = self._mock_db([doc])
+        from tests.datasources.test_firestore import (
+            FakeFirestore,
+            _subscription_doc,
+        )
+
+        db = FakeFirestore()
+        db.store["clippings"]["clip-camel"] = _camel_clipping_doc()
+        db.store["subscriptions"]["sub-1"] = _subscription_doc(
+            clippingId="clip-camel", userId="user-123", role="author"
+        )
 
         ds = FirestoreDatasource(db)
-        result = ds.get_clippings("user-123")
+        results = ds.get_my_clippings("user-123")
 
-        assert len(result) == 1
-        clipping = result[0]
+        assert len(results) == 1
+        clipping = results[0].clipping
         assert isinstance(clipping, ClippingData)
         assert clipping.id == "clip-camel"
         # bug histórico: schedule_time vinha como None com docs camelCase
@@ -345,18 +343,22 @@ class TestFirestoreDatasourceUsesPydantic:
         que o datasource deve parsear corretamente (sem perder campos).
         """
         from tests.conftest import make_firestore_clipping_doc_camel
+        from tests.datasources.test_firestore import (
+            FakeFirestore,
+            _subscription_doc,
+        )
 
-        doc = MagicMock()
-        doc.id = "clip-helper"
-        doc.exists = True
-        doc.to_dict.return_value = make_firestore_clipping_doc_camel(
+        db = FakeFirestore()
+        db.store["clippings"]["clip-helper"] = make_firestore_clipping_doc_camel(
             scheduleTime="07:30"
         )
-        db = self._mock_db([doc])
+        db.store["subscriptions"]["sub-1"] = _subscription_doc(
+            clippingId="clip-helper", userId="user-123", role="author"
+        )
 
         ds = FirestoreDatasource(db)
-        result = ds.get_clippings("user-123")
+        results = ds.get_my_clippings("user-123")
 
-        assert len(result) == 1
-        assert result[0].schedule_time == "07:30"
-        assert result[0].delivery_channels is not None
+        assert len(results) == 1
+        assert results[0].clipping.schedule_time == "07:30"
+        assert results[0].clipping.delivery_channels is not None
