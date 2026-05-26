@@ -30,7 +30,9 @@ async def test_get_oidc_token_returns_token_for_remote_audience():
     assert route.called
     request = route.calls.last.request
     assert request.headers["Metadata-Flavor"] == "Google"
-    assert audience in str(request.url)
+    # audience vai como query param (URL-encoded). Conferir via params decoded.
+    assert request.url.params.get("audience") == audience
+    assert request.url.params.get("format") == "full"
 
 
 @pytest.mark.asyncio
