@@ -1,5 +1,6 @@
 import strawberry
 
+from graphql_api.schema.resolvers.agent import AgentSubscription
 from graphql_api.schema.resolvers.analytics import AnalyticsQuery
 from graphql_api.schema.resolvers.articles import ArticleQuery
 from graphql_api.schema.resolvers.clippings import ClippingMutation, ClippingQuery
@@ -33,4 +34,9 @@ class Mutation(ClippingMutation, MarketplaceMutation, PushMutation, InternalMuta
     pass
 
 
-schema = strawberry.Schema(query=Query, mutation=Mutation)
+@strawberry.type
+class Subscription(AgentSubscription):
+    pass
+
+
+schema = strawberry.Schema(query=Query, mutation=Mutation, subscription=Subscription)
