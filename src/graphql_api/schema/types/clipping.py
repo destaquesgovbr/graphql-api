@@ -1,14 +1,36 @@
+"""Tipos Strawberry para clipping.
+
+Fase A1: `DeliveryChannels` e `Recorte` sao gerados a partir dos modelos
+Pydantic `DeliveryChannelsData` e `RecorteData` em
+`graphql_api.datasources.firestore` via
+`strawberry.experimental.pydantic.type`. Strawberry continua expondo nomes
+camelCase no schema GraphQL (default), derivados de campos Python snake_case.
+
+`Clipping` continua sendo declarado como `@strawberry.type` por enquanto:
+- `ClippingData.recortes` e `list[dict]` (mocks legados) e
+- `ClippingData.delivery_channels` e `Optional[dict]`
+
+Migrar `Clipping` para `@pydantic_type` exige unificar todos esses dicts em
+`RecorteData`/`DeliveryChannelsData` no datasource (e nos ~30 mocks dos
+resolvers), trabalho que pertence a Fase A2/A3.
+
+Os tipos de entrada (`ClippingInput`, `DeliveryChannelsInput`, `RecorteInput`)
+permanecem dataclasses Strawberry puros — sao construidos pelos clientes, nao
+por leitura do Firestore.
+"""
+
 from datetime import datetime
 from typing import Optional
 
 import strawberry
+from strawberry.experimental.pydantic import type as pydantic_type
+
+from graphql_api.datasources.firestore import DeliveryChannelsData, RecorteData
 
 
-@strawberry.type
+@pydantic_type(model=DeliveryChannelsData, all_fields=True)
 class DeliveryChannels:
-    email: bool = False
-    telegram: bool = False
-    push: bool = False
+    pass
 
 
 @strawberry.input
@@ -18,13 +40,9 @@ class DeliveryChannelsInput:
     push: bool = False
 
 
-@strawberry.type
+@pydantic_type(model=RecorteData, all_fields=True)
 class Recorte:
-    id: str
-    title: str
-    themes: list[str]
-    agencies: list[str]
-    keywords: list[str]
+    pass
 
 
 @strawberry.input
