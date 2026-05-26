@@ -1,3 +1,4 @@
+import re
 from typing import Optional
 
 import strawberry
@@ -5,6 +6,7 @@ from strawberry.types import Info
 
 from graphql_api.auth.guards import IsAuthenticated
 from graphql_api.datasources.firestore import ClippingData, UnauthorizedError
+from graphql_api.lib.cron import is_valid_cron
 from graphql_api.schema.types.clipping import (
     Clipping,
     ClippingInput,
@@ -16,6 +18,14 @@ from graphql_api.schema.types.clipping import (
     UserSubscription,
     user_subscription_from_data,
 )
+
+# Regex pragmático para email — mesmo conjunto usado em pyfilters; não pretende
+# ser RFC 5322 completo, só rejeitar lixo óbvio antes de cair no datasource.
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+
+# Limite arbitrário do plano A4: cada clipping pode endereçar até 20 emails
+# externos. Mais que isso vira lista de distribuição (fora do escopo).
+_MAX_EXTRA_EMAILS = 20
 
 
 def _to_graphql_clipping(data: ClippingData) -> Clipping:
@@ -45,13 +55,38 @@ def _to_graphql_clipping(data: ClippingData) -> Clipping:
         description=data.description,
         recortes=recortes,
         prompt=data.prompt,
+        schedule=data.schedule or "",
         schedule_time=data.schedule_time,
+        next_run_at=data.next_run_at,
+        start_date=data.start_date,
+        end_date=data.end_date,
+        extra_emails=list(data.extra_emails or []),
+        include_history=bool(data.include_history),
         delivery_channels=delivery_channels,
         active=data.active,
         created_at=data.created_at,
         updated_at=data.updated_at,
         _author_user_id=data.author_user_id,
     )
+
+
+def _validate_schedule_input(input: ClippingInput) -> None:
+    """Valida campos cron-relacionados do input. Lança ValueError com mensagem
+    voltada ao usuário; o resolver re-emite como erro GraphQL.
+    """
+    if not is_valid_cron(input.schedule):
+        raise ValueError(
+            f"schedule inválido: '{input.schedule}' não é uma expressão cron de 5 campos"
+        )
+
+    if input.extra_emails:
+        if len(input.extra_emails) > _MAX_EXTRA_EMAILS:
+            raise ValueError(
+                f"extraEmails excede o limite máximo de {_MAX_EXTRA_EMAILS} endereços"
+            )
+        for email in input.extra_emails:
+            if not _EMAIL_RE.match(email):
+                raise ValueError(f"email inválido em extraEmails: '{email}'")
 
 
 def _input_to_dict(input: ClippingInput) -> dict:
@@ -72,7 +107,12 @@ def _input_to_dict(input: ClippingInput) -> dict:
         "description": input.description,
         "recortes": recortes,
         "prompt": input.prompt,
+        "schedule": input.schedule,
         "schedule_time": input.schedule_time,
+        "start_date": input.start_date,
+        "end_date": input.end_date,
+        "extra_emails": list(input.extra_emails or []),
+        "include_history": bool(input.include_history) if input.include_history is not None else False,
     }
 
     if input.delivery_channels is not None:
@@ -154,6 +194,8 @@ class ClippingMutation:
         ctx = info.context
         ds = ctx.firestore_ds
         user_id = ctx.user.id
+        # A4: validar schedule + extraEmails antes de tocar o datasource.
+        _validate_schedule_input(input)
         data = _input_to_dict(input)
         result = ds.create_clipping(user_id, data)
         return _to_graphql_clipping(result)
@@ -166,7 +208,24 @@ class ClippingMutation:
         ctx = info.context
         ds = ctx.firestore_ds
         user_id = ctx.user.id
+        # A4: validar schedule + extraEmails antes de tocar o datasource.
+        _validate_schedule_input(input)
         data = _input_to_dict(input)
+        # Calcular nextRunAt *no resolver* também — assim o teste de mock
+        # pode inspecionar `data["next_run_at"]` sem depender da
+        # implementação real do datasource. O datasource também calcula
+        # (idempotente).
+        from datetime import datetime, timezone
+
+        from graphql_api.lib.cron import calculate_next_run
+
+        if data.get("schedule"):
+            data["next_run_at"] = calculate_next_run(
+                data["schedule"],
+                datetime.now(tz=timezone.utc),
+                start_date=data.get("start_date"),
+                end_date=data.get("end_date"),
+            )
         result = ds.update_clipping(user_id, id, data)
         return _to_graphql_clipping(result)
 

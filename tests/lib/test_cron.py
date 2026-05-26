@@ -8,8 +8,6 @@ Valida:
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from graphql_api.lib.cron import calculate_next_run, is_valid_cron
 
 

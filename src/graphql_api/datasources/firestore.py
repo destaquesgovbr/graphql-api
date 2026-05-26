@@ -70,6 +70,10 @@ class ClippingData(BaseModel):
     Aceita tanto camelCase (Firestore producao) quanto snake_case
     (mocks legados). Sempre escreve camelCase via `model_dump(by_alias=True)`.
 
+    Fase A4 adicionou os campos cron: `schedule`, `next_run_at`, `start_date`,
+    `end_date`, `extra_emails`, `include_history`. `schedule_time` é mantido
+    como legacy readable (clippings antigos com slot 30min — `"08:00"`).
+
     Note: `delivery_channels` permanece no model para retro-compat dos 122
     testes anteriores e dos mocks que ainda passam `deliveryChannels` no doc
     do clipping. Em produção, o campo só vive na subscription — `populate_by_name`
@@ -83,7 +87,14 @@ class ClippingData(BaseModel):
     description: Optional[str] = None
     recortes: list[dict] = Field(default_factory=list)
     prompt: Optional[str] = None
-    schedule_time: Optional[str] = Field(default=None, alias="scheduleTime")
+    # A4: cron + janela
+    schedule: str = ""
+    schedule_time: Optional[str] = Field(default=None, alias="scheduleTime")  # legacy
+    next_run_at: Optional[datetime] = Field(default=None, alias="nextRunAt")
+    start_date: Optional[datetime] = Field(default=None, alias="startDate")
+    end_date: Optional[datetime] = Field(default=None, alias="endDate")
+    extra_emails: list[str] = Field(default_factory=list, alias="extraEmails")
+    include_history: bool = Field(default=False, alias="includeHistory")
     delivery_channels: Optional[dict] = Field(default=None, alias="deliveryChannels")
     active: bool = True
     author_user_id: Optional[str] = Field(default=None, alias="authorUserId")
@@ -279,8 +290,11 @@ class FirestoreDatasource:
         """
         now = datetime.now(tz=timezone.utc)
 
-        # Separar campos da subscription dos do clipping
-        sub_only_keys = {"delivery_channels", "extra_emails", "webhook_url"}
+        # Separar campos da subscription dos do clipping.
+        # A4: `extra_emails` agora *também* vive no clipping (§8.0). O campo
+        # sub-only é apenas `sub_extra_emails` (opt-in para preencher a sub
+        # do autor com emails específicos).
+        sub_only_keys = {"delivery_channels", "webhook_url", "sub_extra_emails"}
         clipping_payload: dict = {}
         for key, value in data.items():
             if key in sub_only_keys:
@@ -291,6 +305,18 @@ class FirestoreDatasource:
         clipping_payload["author_user_id"] = user_id
         clipping_payload["created_at"] = now
         clipping_payload["updated_at"] = now
+
+        # Cálculo do nextRunAt (A4). Se schedule inválido ou ausente, fica None.
+        schedule_expr = clipping_payload.get("schedule") or ""
+        if schedule_expr:
+            from graphql_api.lib.cron import calculate_next_run
+
+            clipping_payload["next_run_at"] = calculate_next_run(
+                schedule_expr,
+                now,
+                start_date=clipping_payload.get("start_date"),
+                end_date=clipping_payload.get("end_date"),
+            )
 
         # Validar via Pydantic e dump em camelCase (canônico no Firestore)
         # `id` é dummy aqui — gerado pelo Firestore logo abaixo.
@@ -309,7 +335,11 @@ class FirestoreDatasource:
 
         # Sub do autor
         delivery_channels = data.get("delivery_channels") or {}
-        extra_emails = data.get("extra_emails") or []
+        # `sub_extra_emails` (opcional) tem prioridade sobre o `extra_emails`
+        # do clipping — sub_extra_emails é explicitamente sub-only.
+        sub_extra_emails = data.get("sub_extra_emails")
+        if sub_extra_emails is None:
+            sub_extra_emails = []
         webhook_url = data.get("webhook_url") or ""
         sub_model = SubscriptionData(
             id=sub_id,
@@ -317,7 +347,7 @@ class FirestoreDatasource:
             user_id=user_id,
             role="author",
             delivery_channels=delivery_channels,
-            extra_emails=list(extra_emails),
+            extra_emails=list(sub_extra_emails),
             webhook_url=webhook_url,
             active=True,
             subscribed_at=now,
@@ -351,8 +381,27 @@ class FirestoreDatasource:
 
         now = datetime.now(tz=timezone.utc)
         # Remover campos que pertencem à subscription (defensivo).
-        sub_only_keys = {"delivery_channels", "extra_emails", "webhook_url"}
+        sub_only_keys = {"delivery_channels", "webhook_url", "sub_extra_emails"}
         update_payload: dict = {k: v for k, v in data.items() if k not in sub_only_keys}
+
+        # A4: recalcular nextRunAt sempre que `schedule`/`start_date`/`end_date`
+        # entrarem no payload (ou mudarem).
+        recalc_keys = {"schedule", "start_date", "end_date"}
+        if recalc_keys & update_payload.keys():
+            from graphql_api.lib.cron import calculate_next_run
+
+            # Estado pós-update: payload tem prioridade sobre o doc atual.
+            schedule_expr = update_payload.get("schedule") or current.get("schedule") or ""
+            start_date = update_payload.get(
+                "start_date", current.get("startDate") or current.get("start_date")
+            )
+            end_date = update_payload.get(
+                "end_date", current.get("endDate") or current.get("end_date")
+            )
+            if schedule_expr:
+                update_payload["next_run_at"] = calculate_next_run(
+                    schedule_expr, now, start_date=start_date, end_date=end_date
+                )
 
         # Converter snake_case dos updates para camelCase: para cada campo do
         # payload, consultar `model_fields` e usar o alias correspondente.

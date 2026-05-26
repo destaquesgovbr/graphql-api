@@ -131,7 +131,7 @@ class SubscribeInput:
 
 
 # ---------------------------------------------------------------------------
-# Clipping (com campos contextuais A3)
+# Clipping (com campos contextuais A3 + cron A4)
 # ---------------------------------------------------------------------------
 @strawberry.type
 class Clipping:
@@ -140,7 +140,16 @@ class Clipping:
     description: Optional[str] = None
     recortes: list[Recorte] = strawberry.field(default_factory=list)
     prompt: Optional[str] = None
-    schedule_time: Optional[str] = None
+
+    # A4: cron + janela
+    schedule: str = ""
+    schedule_time: Optional[str] = None  # legacy (readable)
+    next_run_at: Optional[datetime] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    extra_emails: list[str] = strawberry.field(default_factory=list)
+    include_history: bool = False
+
     delivery_channels: Optional[DeliveryChannels] = None
     active: bool = True
     created_at: Optional[datetime] = None
@@ -182,11 +191,23 @@ class Clipping:
 
 @strawberry.input
 class ClippingInput:
+    """Input do `createClipping` / `updateClipping`.
+
+    Fase A4: `schedule` é **obrigatório**, expresso como cron de 5 campos.
+    `nextRunAt` NÃO aparece aqui — é calculado pelo backend a partir de
+    `schedule` + `startDate` + `endDate`.
+    """
+
     name: str
+    schedule: str
     description: Optional[str] = None
     recortes: list[RecorteInput] = strawberry.field(default_factory=list)
     prompt: Optional[str] = None
-    schedule_time: Optional[str] = None
+    schedule_time: Optional[str] = None  # legacy, opcional
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    extra_emails: Optional[list[str]] = None
+    include_history: Optional[bool] = None
     delivery_channels: Optional[DeliveryChannelsInput] = None
 
 

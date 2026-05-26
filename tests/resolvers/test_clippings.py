@@ -563,10 +563,9 @@ class TestClippingA4ScheduleFields:
         sd = ClippingInput.__strawberry_definition__
         schedule_field = next((f for f in sd.fields if f.python_name == "schedule"), None)
         assert schedule_field is not None
-        # Non-null = não opcional. `Optional[str]` seria nullable.
-        from typing import get_origin
-
-        # Para Strawberry, o campo tem `.type` que descreve. Vamos checar via SDL.
+        # Non-null = não opcional. Validamos via SDL para evitar acoplar com
+        # a estrutura interna de Strawberry (`StrawberryField.type` muda entre
+        # versões).
         import strawberry
 
         @strawberry.type
