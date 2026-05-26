@@ -83,15 +83,18 @@ def _input_to_dict(input: ClippingInput) -> dict:
 @strawberry.type
 class ClippingQuery:
     @strawberry.field(
-        description="Lista todos os clippings do usuario autenticado",
+        description="Lista todos os clippings do usuario autenticado (autorados + inscritos)",
         permission_classes=[IsAuthenticated],
     )
     def clippings(self, info: Info) -> list[Clipping]:
         ctx = info.context
         ds = ctx.firestore_ds
         user_id = ctx.user.id
-        items = ds.get_clippings(user_id)
-        return [_to_graphql_clipping(c) for c in items]
+        # A2: get_my_clippings retorna [(ClippingData, SubscriptionData)].
+        # Por enquanto, expomos só o Clipping no schema; A3 adiciona
+        # `isAuthor` e `mySubscription` ao tipo Strawberry.
+        results = ds.get_my_clippings(user_id)
+        return [_to_graphql_clipping(r.clipping) for r in results]
 
     @strawberry.field(
         description="Busca um clipping por ID",
@@ -100,8 +103,9 @@ class ClippingQuery:
     def clipping(self, info: Info, id: str) -> Optional[Clipping]:
         ctx = info.context
         ds = ctx.firestore_ds
-        user_id = ctx.user.id
-        data = ds.get_clipping(user_id, id)
+        # A2: get_clipping é top-level, não exige user_id no path.
+        # Autorização granular fica para A3 quando expusermos mySubscription.
+        data = ds.get_clipping(id)
         if data is None:
             return None
         return _to_graphql_clipping(data)
