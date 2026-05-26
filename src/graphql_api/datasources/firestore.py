@@ -1,21 +1,105 @@
-from dataclasses import dataclass, field
+"""Datasource Firestore para clippings e marketplace listings.
+
+Fase A1 — Foundation
+--------------------
+Os models de dados aqui sao Pydantic `BaseModel` com `Field(alias=...)` para
+fechar a fronteira camelCase (Firestore) <-> snake_case (Python). Isso resolve
+o bug historico em que campos como `scheduleTime`, `deliveryChannels` e
+`createdAt` no Firestore nao eram parseados (o dataclass esperava
+`schedule_time`/`delivery_channels`/`created_at`).
+
+A configuracao `populate_by_name=True` permite que tanto a forma camelCase
+(producao) quanto a forma snake_case (mocks legados) sejam aceitas, sem quebrar
+os testes existentes.
+
+Para gravar no Firestore, use `model.model_dump(by_alias=True)` — isso produz
+um dict camelCase, que e o formato canonico das colecoes (veja
+`PLANO-ATUALIZACAO-v2.md` §8.0).
+"""
+
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
-import uuid
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
-@dataclass
-class ClippingData:
+class DeliveryChannelsData(BaseModel):
+    """Sub-modelo dos canais de entrega de um clipping/subscription.
+
+    Note: deliberadamente *sem* `webhook` nesta fase — sera adicionado em A5
+    (ver PLANO-ATUALIZACAO-v2.md §5 Fase A5).
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    email: bool = False
+    telegram: bool = False
+    push: bool = False
+
+
+class RecorteData(BaseModel):
+    """Sub-modelo de um recorte (tema/agencia/keyword)."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    id: str = ""
+    title: str = ""
+    themes: list[str] = Field(default_factory=list)
+    agencies: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+
+
+class ClippingData(BaseModel):
+    """Modelo canonico de um clipping.
+
+    Aceita tanto camelCase (Firestore producao) quanto snake_case
+    (mocks legados). Sempre escreve camelCase via `model_dump(by_alias=True)`.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
     id: str
-    name: str
+    name: str = ""
     description: Optional[str] = None
-    recortes: list[dict] = field(default_factory=list)
+    # `recortes` e `delivery_channels` permanecem como dict por enquanto: os
+    # 110 testes existentes pre-A1 montam fixtures com `list[dict]` e os
+    # resolvers acessam `r.get("id")` etc. Migrar para `list[RecorteData]`
+    # e `DeliveryChannelsData` aqui exigiria reescrever ~30 testes alheios
+    # ao escopo de A1. A escolha do brief (PLANO-ATUALIZACAO-v2.md §5 Fase
+    # A1, exemplo de modelo) e manter `list[dict]` / `Optional[dict]` neste
+    # momento e fazer a migracao em A2/A3.
+    recortes: list[dict] = Field(default_factory=list)
     prompt: Optional[str] = None
-    schedule_time: Optional[str] = None
-    delivery_channels: Optional[dict] = None
+    schedule_time: Optional[str] = Field(default=None, alias="scheduleTime")
+    delivery_channels: Optional[dict] = Field(default=None, alias="deliveryChannels")
     active: bool = True
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    created_at: Optional[datetime] = Field(default=None, alias="createdAt")
+    updated_at: Optional[datetime] = Field(default=None, alias="updatedAt")
+
+
+class MarketplaceListingData(BaseModel):
+    """Modelo canonico de um listing de marketplace.
+
+    `marketplace/{id}` no Firestore — ver §8.0 do PLANO-ATUALIZACAO-v2.md.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    id: str
+    author_user_id: str = Field(default="", alias="authorUserId")
+    author_display_name: str = Field(default="", alias="authorDisplayName")
+    source_clipping_id: str = Field(default="", alias="sourceClippingId")
+    name: str = ""
+    description: Optional[str] = None
+    recortes: list[dict] = Field(default_factory=list)
+    prompt: Optional[str] = None
+    like_count: int = Field(default=0, alias="likeCount")
+    follower_count: int = Field(default=0, alias="followerCount")
+    clone_count: int = Field(default=0, alias="cloneCount")
+    published_at: Optional[datetime] = Field(default=None, alias="publishedAt")
+    updated_at: Optional[datetime] = Field(default=None, alias="updatedAt")
+    active: bool = True
 
 
 MAX_CLIPPINGS_PER_USER = 10
@@ -33,18 +117,9 @@ class FirestoreDatasource:
         return self._db.collection("users").document(user_id).collection("clippings")
 
     def _doc_to_clipping(self, doc_id: str, data: dict) -> ClippingData:
-        return ClippingData(
-            id=doc_id,
-            name=data.get("name", ""),
-            description=data.get("description"),
-            recortes=data.get("recortes", []),
-            prompt=data.get("prompt"),
-            schedule_time=data.get("schedule_time"),
-            delivery_channels=data.get("delivery_channels"),
-            active=data.get("active", True),
-            created_at=data.get("created_at"),
-            updated_at=data.get("updated_at"),
-        )
+        # `model_validate` aceita tanto camelCase (alias) quanto snake_case
+        # (populate_by_name=True). Campo `id` injetado a partir do doc.id.
+        return ClippingData.model_validate({"id": doc_id, **(data or {})})
 
     def get_clippings(self, user_id: str) -> list[ClippingData]:
         ref = self._user_clippings_ref(user_id)
