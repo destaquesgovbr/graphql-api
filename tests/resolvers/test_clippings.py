@@ -294,7 +294,8 @@ class TestClippingContextFields:
         assert result.errors is None, f"Errors: {result.errors}"
         assert result.data["clippings"][0]["isAuthor"] is False
 
-    def test_clipping_my_subscription_returns_subscription(self, mock_firestore_ds):
+    @pytest.mark.asyncio
+    async def test_clipping_my_subscription_returns_subscription(self, mock_firestore_ds):
         sub = _sample_subscription(clipping_id="clip-1", role="subscriber")
         mock_firestore_ds.get_my_clippings.return_value = [
             MyClippingResult(
@@ -305,7 +306,7 @@ class TestClippingContextFields:
         mock_firestore_ds.get_subscriptions_for_user_and_clippings.return_value = {
             "clip-1": sub
         }
-        result = test_schema.execute_sync(
+        result = await test_schema.execute(
             """
             {
                 clippings {
@@ -322,11 +323,12 @@ class TestClippingContextFields:
         assert my_sub["role"] == "SUBSCRIBER"
         assert my_sub["deliveryChannels"]["email"] is True
 
-    def test_clipping_my_subscription_null_when_not_subscribed(self, mock_firestore_ds):
+    @pytest.mark.asyncio
+    async def test_clipping_my_subscription_null_when_not_subscribed(self, mock_firestore_ds):
         """Clipping retornado por `clipping(id)` (público) sem sub do user."""
         mock_firestore_ds.get_clipping.return_value = _sample_clipping_data(id="clip-pub")
         mock_firestore_ds.get_subscriptions_for_user_and_clippings.return_value = {}
-        result = test_schema.execute_sync(
+        result = await test_schema.execute(
             """
             query($id: String!) {
                 clipping(id: $id) {
@@ -341,7 +343,8 @@ class TestClippingContextFields:
         assert result.errors is None, f"Errors: {result.errors}"
         assert result.data["clipping"]["mySubscription"] is None
 
-    def test_my_subscription_uses_dataloader_no_n_plus_1(self, mock_firestore_ds):
+    @pytest.mark.asyncio
+    async def test_my_subscription_uses_dataloader_no_n_plus_1(self, mock_firestore_ds):
         """5 clippings em uma query → 1 chamada ao datasource para subs."""
         mock_firestore_ds.get_my_clippings.return_value = [
             MyClippingResult(
@@ -353,7 +356,7 @@ class TestClippingContextFields:
         mock_firestore_ds.get_subscriptions_for_user_and_clippings.return_value = {
             f"clip-{i}": _sample_subscription(clipping_id=f"clip-{i}") for i in range(5)
         }
-        result = test_schema.execute_sync(
+        result = await test_schema.execute(
             "{ clippings { id mySubscription { id } } }",
             context_value=self._ctx_with_loader(mock_firestore_ds),
         )

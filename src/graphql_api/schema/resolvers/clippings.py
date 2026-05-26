@@ -4,13 +4,17 @@ import strawberry
 from strawberry.types import Info
 
 from graphql_api.auth.guards import IsAuthenticated
-from graphql_api.datasources.firestore import ClippingData
+from graphql_api.datasources.firestore import ClippingData, UnauthorizedError
 from graphql_api.schema.types.clipping import (
     Clipping,
     ClippingInput,
     DeliveryChannels,
+    DeliveryChannelsInput,
     EstimateResult,
     Recorte,
+    SubscribeInput,
+    UserSubscription,
+    user_subscription_from_data,
 )
 
 
@@ -46,6 +50,7 @@ def _to_graphql_clipping(data: ClippingData) -> Clipping:
         active=data.active,
         created_at=data.created_at,
         updated_at=data.updated_at,
+        _author_user_id=data.author_user_id,
     )
 
 
@@ -80,6 +85,20 @@ def _input_to_dict(input: ClippingInput) -> dict:
     return result
 
 
+def _channels_input_to_dict(channels: DeliveryChannelsInput) -> dict:
+    """Converte `DeliveryChannelsInput` para dict (canônico no Firestore).
+
+    Inclui `webhook=False` por compat com modelo de subscription (A5 vai
+    expor `webhook` no input; por enquanto sempre False).
+    """
+    return {
+        "email": channels.email,
+        "telegram": channels.telegram,
+        "push": channels.push,
+        "webhook": False,
+    }
+
+
 @strawberry.type
 class ClippingQuery:
     @strawberry.field(
@@ -91,8 +110,7 @@ class ClippingQuery:
         ds = ctx.firestore_ds
         user_id = ctx.user.id
         # A2: get_my_clippings retorna [(ClippingData, SubscriptionData)].
-        # Por enquanto, expomos só o Clipping no schema; A3 adiciona
-        # `isAuthor` e `mySubscription` ao tipo Strawberry.
+        # A3: `isAuthor` e `mySubscription` resolvem via campos contextuais.
         results = ds.get_my_clippings(user_id)
         return [_to_graphql_clipping(r.clipping) for r in results]
 
@@ -169,3 +187,61 @@ class ClippingMutation:
     def send_clipping(self, info: Info, id: str) -> bool:
         # Placeholder: would trigger the actual send pipeline
         return True
+
+    # -- Subscription mutations (Fase A3) -----------------------------------
+    @strawberry.mutation(
+        description="Inscreve o usuário autenticado em um clipping (role=subscriber)",
+        permission_classes=[IsAuthenticated],
+    )
+    def subscribe_to_clipping(self, info: Info, input: SubscribeInput) -> UserSubscription:
+        ctx = info.context
+        ds = ctx.firestore_ds
+        user_id = ctx.user.id
+        sub = ds.subscribe_to_clipping(
+            user_id=user_id,
+            clipping_id=input.clipping_id,
+            channels=_channels_input_to_dict(input.delivery_channels),
+            extra_emails=list(input.extra_emails or []),
+            webhook_url=input.webhook_url or "",
+        )
+        return user_subscription_from_data(sub)
+
+    @strawberry.mutation(
+        description="Remove a inscrição do usuário em um clipping",
+        permission_classes=[IsAuthenticated],
+    )
+    def unsubscribe_from_clipping(self, info: Info, clipping_id: str) -> bool:
+        ctx = info.context
+        ds = ctx.firestore_ds
+        user_id = ctx.user.id
+        try:
+            return ds.unsubscribe_from_clipping(user_id, clipping_id)
+        except UnauthorizedError as exc:
+            # Autor não pode self-unsubscribe — propagar como erro GraphQL
+            raise PermissionError(str(exc)) from exc
+
+    @strawberry.mutation(
+        description="Atualiza canais de entrega da inscrição do usuário",
+        permission_classes=[IsAuthenticated],
+    )
+    def update_my_subscription(
+        self,
+        info: Info,
+        clipping_id: str,
+        channels: DeliveryChannelsInput,
+        extra_emails: Optional[list[str]] = None,
+        webhook_url: Optional[str] = None,
+    ) -> Optional[UserSubscription]:
+        ctx = info.context
+        ds = ctx.firestore_ds
+        user_id = ctx.user.id
+        sub = ds.update_my_subscription(
+            user_id=user_id,
+            clipping_id=clipping_id,
+            channels=_channels_input_to_dict(channels),
+            extra_emails=list(extra_emails or []),
+            webhook_url=webhook_url or "",
+        )
+        if sub is None:
+            return None
+        return user_subscription_from_data(sub)

@@ -154,13 +154,48 @@ class MarketplaceMutation:
 
     @strawberry.mutation(
         description="Segue/deixa de seguir um listing do marketplace",
+        deprecation_reason=(
+            "Use `subscribeToClipping(input)` passando `sourceClippingId` do "
+            "listing. Esta mutation continua funcional para retro-compat e "
+            "será removida em R1."
+        ),
         permission_classes=[IsAuthenticated],
     )
     def follow_marketplace_listing(self, info: Info, listing_id: str) -> bool:
+        """Backward-compat: delega para `subscribe_to_clipping` (Fase A3).
+
+        Lookup do listing → `sourceClippingId` → subscribe com channels default
+        (apenas email = True). A interface pública continua bool/listingId
+        para não quebrar clientes legados durante o rollout.
+        """
         ctx = info.context
         ds = ctx.firestore_ds
         user_id = ctx.user.id
-        return ds.toggle_follow_marketplace(user_id, listing_id)
+
+        listing = ds.get_marketplace_listing(listing_id)
+        if listing is None:
+            return False
+        # `sourceClippingId` (camelCase) é o canônico; fallback snake_case
+        # para fixtures legados.
+        source_clipping_id = (
+            listing.get("sourceClippingId") or listing.get("source_clipping_id")
+        )
+        if not source_clipping_id:
+            return False
+
+        ds.subscribe_to_clipping(
+            user_id=user_id,
+            clipping_id=source_clipping_id,
+            channels={
+                "email": True,
+                "telegram": False,
+                "push": False,
+                "webhook": False,
+            },
+            extra_emails=[],
+            webhook_url="",
+        )
+        return True
 
     @strawberry.mutation(
         description="Clona um listing do marketplace para os clippings do usuario",

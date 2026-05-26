@@ -8,7 +8,6 @@ namespace dos clippings) por D2 do plano (clipping-centric).
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
-import pytest
 import strawberry
 
 from graphql_api.context import GraphQLContext, User

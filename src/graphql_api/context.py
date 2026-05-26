@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from strawberry.fastapi import BaseContext
 
@@ -38,6 +38,15 @@ class GraphQLContext(BaseContext):
         self.firestore_ds = firestore_ds
         self.postgres_ds = postgres_ds
         self.typesense_admin_ds = typesense_admin_ds
+        # Fase A3: dataloader populado por request em `get_context()` quando
+        # houver firestore_ds. Mantém-se Optional para os testes que injetam
+        # contexto manualmente sem dataloader.
+        self.subscription_loader: Optional[Any] = None
+        if firestore_ds is not None:
+            # Import local para evitar ciclo (dataloaders importa firestore).
+            from graphql_api.dataloaders import create_subscription_loader
+
+            self.subscription_loader = create_subscription_loader(firestore_ds)
 
     @property
     def is_authenticated(self) -> bool:

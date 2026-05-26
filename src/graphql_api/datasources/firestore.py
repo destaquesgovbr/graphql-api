@@ -238,6 +238,32 @@ class FirestoreDatasource:
             return self._doc_to_subscription(d.id, d.to_dict())
         return None
 
+    def get_subscriptions_for_user_and_clippings(
+        self, user_id: str, clipping_ids: list[str]
+    ) -> dict[str, SubscriptionData]:
+        """Batch lookup das subscriptions de um user para vários clippings.
+
+        Usado pelo dataloader em A3 para resolver `Clipping.mySubscription`
+        sem N+1: 1 query Firestore `subscriptions where userId == user_id`,
+        filtrando local para os `clipping_ids` solicitados.
+
+        Decisão: query por `userId` (não composta) + filtro client-side é
+        defensiva — evita depender do operador `in` com listas grandes (limite
+        de 30 IDs no Firestore) e do índice composto `userId+clippingId`.
+        Em troca, lê todas as subs do usuário, o que costuma ser O(dezenas).
+        """
+        if not clipping_ids:
+            return {}
+        clipping_id_set = set(clipping_ids)
+        query = self._subscriptions_ref().where("userId", "==", user_id)
+        result: dict[str, SubscriptionData] = {}
+        for d in query.stream():
+            data = d.to_dict() or {}
+            cid = data.get("clippingId") or data.get("clipping_id")
+            if cid in clipping_id_set:
+                result[cid] = self._doc_to_subscription(d.id, data)
+        return result
+
     # -- write: clippings ---------------------------------------------------
     def create_clipping(self, user_id: str, data: dict) -> ClippingData:
         """Cria clipping + author subscription em batch atômico.
