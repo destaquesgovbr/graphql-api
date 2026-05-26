@@ -266,6 +266,204 @@ class TestUpdateMySubscription:
         ds.update_my_subscription.assert_called_once()
 
 
+# ---------------------------------------------------------------------------
+# Fase A5 — Validacao webhook + webhookUrl
+# ---------------------------------------------------------------------------
+class TestSubscribeWebhookValidation:
+    def test_subscription_with_webhook_true_requires_webhook_url(self):
+        """`channels.webhook=True` sem `webhookUrl` -> validation error."""
+        ds = _make_mock_ds()
+        result = test_schema.execute_sync(
+            SUBSCRIBE_MUTATION,
+            variable_values={
+                "input": {
+                    "clippingId": "clip-1",
+                    "deliveryChannels": {
+                        "email": False,
+                        "telegram": False,
+                        "push": False,
+                        "webhook": True,
+                    },
+                    "webhookUrl": None,
+                }
+            },
+            context_value=_auth_ctx(ds),
+        )
+        assert result.errors is not None
+        assert "webhookurl" in str(result.errors[0].message).lower()
+        # Datasource nao deve ter sido chamado
+        ds.subscribe_to_clipping.assert_not_called()
+
+    def test_subscription_with_webhook_url_validates_https(self):
+        """`webhookUrl=http://...` deve ser rejeitado (so https)."""
+        ds = _make_mock_ds()
+        result = test_schema.execute_sync(
+            SUBSCRIBE_MUTATION,
+            variable_values={
+                "input": {
+                    "clippingId": "clip-1",
+                    "deliveryChannels": {
+                        "email": False,
+                        "telegram": False,
+                        "push": False,
+                        "webhook": True,
+                    },
+                    "webhookUrl": "http://insecure.example.com/hook",
+                }
+            },
+            context_value=_auth_ctx(ds),
+        )
+        assert result.errors is not None
+        assert "https" in str(result.errors[0].message).lower()
+
+    def test_subscription_with_webhook_url_max_length(self):
+        """`webhookUrl` com mais de 2048 chars deve ser rejeitado."""
+        ds = _make_mock_ds()
+        long_url = "https://example.com/" + ("x" * 2100)
+        result = test_schema.execute_sync(
+            SUBSCRIBE_MUTATION,
+            variable_values={
+                "input": {
+                    "clippingId": "clip-1",
+                    "deliveryChannels": {
+                        "email": False,
+                        "telegram": False,
+                        "push": False,
+                        "webhook": True,
+                    },
+                    "webhookUrl": long_url,
+                }
+            },
+            context_value=_auth_ctx(ds),
+        )
+        assert result.errors is not None
+        assert "2048" in str(result.errors[0].message) or "limite" in str(result.errors[0].message).lower()
+
+    def test_subscription_with_valid_https_webhook_succeeds(self):
+        ds = _make_mock_ds()
+        # Mock retorna sub com webhook habilitado
+        ds.subscribe_to_clipping.return_value = SubscriptionData(
+            id="sub-1",
+            clipping_id="clip-1",
+            user_id="user-123",
+            role="subscriber",
+            delivery_channels={
+                "email": False,
+                "telegram": False,
+                "push": False,
+                "webhook": True,
+            },
+            extra_emails=[],
+            webhook_url="https://example.com/hook",
+            active=True,
+            subscribed_at=NOW,
+        )
+        result = test_schema.execute_sync(
+            SUBSCRIBE_MUTATION,
+            variable_values={
+                "input": {
+                    "clippingId": "clip-1",
+                    "deliveryChannels": {
+                        "email": False,
+                        "telegram": False,
+                        "push": False,
+                        "webhook": True,
+                    },
+                    "webhookUrl": "https://example.com/hook",
+                }
+            },
+            context_value=_auth_ctx(ds),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        sub = result.data["subscribeToClipping"]
+        assert sub["webhookUrl"] == "https://example.com/hook"
+
+
+class TestUpdateMySubscriptionWebhook:
+    def test_update_my_subscription_with_webhook_persists_webhook_url(self):
+        """Caminho de update via `updateMySubscription`: webhook=True + url valida."""
+        ds = _make_mock_ds()
+        ds.update_my_subscription.return_value = SubscriptionData(
+            id="sub-1",
+            clipping_id="clip-1",
+            user_id="user-123",
+            role="subscriber",
+            delivery_channels={
+                "email": False,
+                "telegram": False,
+                "push": False,
+                "webhook": True,
+            },
+            extra_emails=[],
+            webhook_url="https://example.com/notify",
+            active=True,
+            subscribed_at=NOW,
+        )
+        result = test_schema.execute_sync(
+            """
+            mutation($clippingId: String!, $channels: DeliveryChannelsInput!, $webhookUrl: String) {
+                updateMySubscription(
+                    clippingId: $clippingId,
+                    channels: $channels,
+                    webhookUrl: $webhookUrl
+                ) {
+                    id
+                    deliveryChannels { email telegram push webhook }
+                    webhookUrl
+                }
+            }
+            """,
+            variable_values={
+                "clippingId": "clip-1",
+                "channels": {
+                    "email": False,
+                    "telegram": False,
+                    "push": False,
+                    "webhook": True,
+                },
+                "webhookUrl": "https://example.com/notify",
+            },
+            context_value=_auth_ctx(ds),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        sub = result.data["updateMySubscription"]
+        assert sub["deliveryChannels"]["webhook"] is True
+        assert sub["webhookUrl"] == "https://example.com/notify"
+        # Confirma que o datasource recebeu webhook=True + url
+        call_args = ds.update_my_subscription.call_args
+        kwargs = call_args.kwargs
+        assert kwargs["channels"]["webhook"] is True
+        assert kwargs["webhook_url"] == "https://example.com/notify"
+
+    def test_update_my_subscription_with_webhook_without_url_fails(self):
+        ds = _make_mock_ds()
+        result = test_schema.execute_sync(
+            """
+            mutation($clippingId: String!, $channels: DeliveryChannelsInput!, $webhookUrl: String) {
+                updateMySubscription(
+                    clippingId: $clippingId,
+                    channels: $channels,
+                    webhookUrl: $webhookUrl
+                ) { id }
+            }
+            """,
+            variable_values={
+                "clippingId": "clip-1",
+                "channels": {
+                    "email": False,
+                    "telegram": False,
+                    "push": False,
+                    "webhook": True,
+                },
+                "webhookUrl": None,
+            },
+            context_value=_auth_ctx(ds),
+        )
+        assert result.errors is not None
+        assert "webhookurl" in str(result.errors[0].message).lower()
+        ds.update_my_subscription.assert_not_called()
+
+
 class TestSubscriptionRoleEnum:
     def test_subscription_role_enum_serializes_to_uppercase(self):
         """`AUTHOR` e `SUBSCRIBER` no schema introspection."""

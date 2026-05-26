@@ -91,6 +91,7 @@ class FakeFirestore:
         self.store: dict[str, dict[str, dict]] = {
             "clippings": {},
             "subscriptions": {},
+            "releases": {},
         }
         self._id_counter = 0
         self.batches_committed = 0
@@ -121,24 +122,81 @@ class _FakeCollection:
         # filter() em versões novas tem assinatura diferente; aqui só replicamos `where`.
         return _FakeQuery(self.db, self.name, [(field, op, value)])
 
+    def order_by(self, field: str, direction: str = "ASCENDING"):
+        return _FakeQuery(self.db, self.name, [], order=(field, direction))
+
+    def limit(self, n: int):
+        return _FakeQuery(self.db, self.name, [], limit=n)
+
     def stream(self):
         for doc_id, data in list(self.db.store[self.name].items()):
             yield _mock_doc(doc_id, data)
 
 
 class _FakeQuery:
-    def __init__(self, db: FakeFirestore, collection: str, filters: list):
+    def __init__(
+        self,
+        db: FakeFirestore,
+        collection: str,
+        filters: list,
+        order: tuple | None = None,
+        limit_n: int | None = None,
+        *,
+        limit: int | None = None,
+    ):
         self.db = db
         self.collection = collection
         self.filters = filters
+        self.order = order
+        # Aceita tanto `limit_n` (interno) quanto `limit` (kwarg externo)
+        # para retrocompat com chamadas existentes.
+        self.limit_n = limit if limit is not None else limit_n
 
     def where(self, field: str, op: str, value):
-        return _FakeQuery(self.db, self.collection, self.filters + [(field, op, value)])
+        return _FakeQuery(
+            self.db,
+            self.collection,
+            self.filters + [(field, op, value)],
+            order=self.order,
+            limit_n=self.limit_n,
+        )
+
+    def order_by(self, field: str, direction: str = "ASCENDING"):
+        return _FakeQuery(
+            self.db,
+            self.collection,
+            self.filters,
+            order=(field, direction),
+            limit_n=self.limit_n,
+        )
+
+    def limit(self, n: int):
+        return _FakeQuery(
+            self.db,
+            self.collection,
+            self.filters,
+            order=self.order,
+            limit_n=n,
+        )
 
     def stream(self):
-        for doc_id, data in list(self.db.store[self.collection].items()):
-            if all(self._match(data, f, op, v) for f, op, v in self.filters):
-                yield _mock_doc(doc_id, data)
+        items = [
+            (doc_id, data)
+            for doc_id, data in list(self.db.store[self.collection].items())
+            if all(self._match(data, f, op, v) for f, op, v in self.filters)
+        ]
+        if self.order is not None:
+            field, direction = self.order
+            reverse = direction.upper().startswith("DESC")
+            # `None` ordena no final; usamos sort key tupla (none_flag, value)
+            def sort_key(item):
+                v = item[1].get(field)
+                return (v is None, v)
+            items.sort(key=sort_key, reverse=reverse)
+        if self.limit_n is not None:
+            items = items[: self.limit_n]
+        for doc_id, data in items:
+            yield _mock_doc(doc_id, data)
 
     @staticmethod
     def _match(data: dict, field: str, op: str, value) -> bool:
@@ -149,6 +207,22 @@ class _FakeQuery:
             return cur != value
         if op == "in":
             return cur in value
+        if op == "<":
+            if cur is None or value is None:
+                return False
+            return cur < value
+        if op == "<=":
+            if cur is None or value is None:
+                return False
+            return cur <= value
+        if op == ">":
+            if cur is None or value is None:
+                return False
+            return cur > value
+        if op == ">=":
+            if cur is None or value is None:
+                return False
+            return cur >= value
         raise NotImplementedError(op)
 
 
@@ -714,3 +788,109 @@ class TestFirestoreCamelCaseDoc:
         results = ds.get_my_clippings("user-1")
         assert len(results) == 1
         assert results[0].clipping.schedule_time == "07:30"
+
+
+# ---------------------------------------------------------------------------
+# Fase A5 — Releases datasource
+# ---------------------------------------------------------------------------
+def _release_doc(**overrides) -> dict:
+    base = {
+        "clippingId": "clip-1",
+        "userId": "user-1",
+        "clippingName": "Meu Clipping",
+        "digest": '{"intro":"texto"}',
+        "digestHtml": "<p>texto</p>",
+        "articlesCount": 5,
+        "createdAt": NOW,
+        "releaseUrl": "/clipping/release/rel-1",
+        "refTime": NOW,
+        "sinceHours": 24,
+    }
+    base.update(overrides)
+    return base
+
+
+class TestReleasesDatasource:
+    def test_release_data_parses_camelcase_doc(self):
+        from graphql_api.datasources.firestore import ReleaseData
+
+        rel = ReleaseData.model_validate({"id": "rel-1", **_release_doc()})
+        assert rel.id == "rel-1"
+        assert rel.clipping_id == "clip-1"
+        assert rel.clipping_name == "Meu Clipping"
+        assert rel.digest_html == "<p>texto</p>"
+        assert rel.articles_count == 5
+        assert rel.created_at == NOW
+        assert rel.release_url == "/clipping/release/rel-1"
+        assert rel.ref_time == NOW
+        assert rel.since_hours == 24
+
+    def test_get_releases_returns_only_matching_clipping_id(self):
+        db = FakeFirestore()
+        db.store["releases"]["rel-a"] = _release_doc(clippingId="clip-1")
+        db.store["releases"]["rel-b"] = _release_doc(clippingId="clip-2")
+        ds = FirestoreDatasource(db)
+        result = ds.get_releases("clip-1", limit=20)
+        assert len(result) == 1
+        assert result[0].id == "rel-a"
+
+    def test_get_releases_sorted_desc_by_created_at(self):
+        from datetime import timedelta
+
+        db = FakeFirestore()
+        db.store["releases"]["older"] = _release_doc(
+            clippingId="clip-1", createdAt=NOW
+        )
+        db.store["releases"]["newer"] = _release_doc(
+            clippingId="clip-1", createdAt=NOW + timedelta(hours=1)
+        )
+        ds = FirestoreDatasource(db)
+        result = ds.get_releases("clip-1", limit=20)
+        # mais recente primeiro
+        assert [r.id for r in result] == ["newer", "older"]
+
+    def test_get_releases_respects_limit(self):
+        from datetime import timedelta
+
+        db = FakeFirestore()
+        for i in range(5):
+            db.store["releases"][f"rel-{i}"] = _release_doc(
+                clippingId="clip-1",
+                createdAt=NOW + timedelta(hours=i),
+            )
+        ds = FirestoreDatasource(db)
+        result = ds.get_releases("clip-1", limit=3)
+        assert len(result) == 3
+
+    def test_get_releases_with_before_cursor(self):
+        from datetime import timedelta
+
+        db = FakeFirestore()
+        t0 = NOW
+        t1 = NOW + timedelta(hours=1)
+        t2 = NOW + timedelta(hours=2)
+        db.store["releases"]["rel-0"] = _release_doc(clippingId="clip-1", createdAt=t0)
+        db.store["releases"]["rel-1"] = _release_doc(clippingId="clip-1", createdAt=t1)
+        db.store["releases"]["rel-2"] = _release_doc(clippingId="clip-1", createdAt=t2)
+        ds = FirestoreDatasource(db)
+        # before=t2 → traz só rel-0 e rel-1 (estritamente < t2)
+        result = ds.get_releases("clip-1", limit=20, before=t2)
+        ids = {r.id for r in result}
+        assert ids == {"rel-0", "rel-1"}
+
+    def test_get_releases_empty_when_no_match(self):
+        db = FakeFirestore()
+        ds = FirestoreDatasource(db)
+        result = ds.get_releases("clip-ghost", limit=20)
+        assert result == []
+
+    def test_get_releases_batch_returns_map_with_all_clipping_ids(self):
+        db = FakeFirestore()
+        db.store["releases"]["rel-a"] = _release_doc(clippingId="clip-1")
+        db.store["releases"]["rel-b"] = _release_doc(clippingId="clip-2")
+        ds = FirestoreDatasource(db)
+        result = ds.get_releases_batch(["clip-1", "clip-2", "clip-3"], limit=10)
+        assert set(result.keys()) == {"clip-1", "clip-2", "clip-3"}
+        assert len(result["clip-1"]) == 1
+        assert len(result["clip-2"]) == 1
+        assert result["clip-3"] == []
