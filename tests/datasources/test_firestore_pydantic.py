@@ -5,9 +5,11 @@ camelCase (Firestore) <-> snake_case (Python), com `populate_by_name=True`.
 """
 
 from datetime import datetime, timezone
+from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
+import strawberry
 from pydantic import ValidationError
 
 from graphql_api.datasources.firestore import (
@@ -15,9 +17,17 @@ from graphql_api.datasources.firestore import (
     FirestoreDatasource,
     MarketplaceListingData,
 )
-
+from graphql_api.schema.types.clipping import Clipping
 
 NOW = datetime(2024, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+
+# stub query usada só para forçar inclusão do Clipping no schema type_map
+@strawberry.type
+class _StubQuery:
+    @strawberry.field
+    def first_clipping(self) -> Optional[Clipping]:
+        return None
 
 
 def _camel_clipping_doc(**overrides) -> dict:
@@ -269,16 +279,12 @@ class TestMarketplaceListingData:
 # ---------------------------------------------------------------------------
 class TestStrawberryUsesPydanticModel:
     def test_strawberry_clipping_type_uses_pydantic_model(self):
-        """O Clipping Strawberry gerado deve expor os mesmos campos."""
-        from graphql_api.schema.types.clipping import Clipping
+        """O Clipping Strawberry deve continuar expondo os mesmos campos
+        (snake_case Python -> camelCase no GraphQL schema)."""
+        schema = strawberry.Schema(query=_StubQuery)
+        clipping_type = schema.schema_converter.type_map.get("Clipping")
+        fields = {f.python_name for f in clipping_type.definition.fields}
 
-        # tipo gerado por strawberry.experimental.pydantic.type aponta para o modelo
-        # via atributo _pydantic_type. Caso a integração mude, basta inspecionar
-        # os campos do schema.
-        import strawberry
-
-        fields = {f.python_name for f in strawberry.Schema(query=_StubQuery).schema_converter.type_map.get("Clipping").definition.fields}
-        # campos snake_case esperados:
         for fname in [
             "id",
             "name",
@@ -292,20 +298,6 @@ class TestStrawberryUsesPydanticModel:
             "updated_at",
         ]:
             assert fname in fields, f"campo '{fname}' ausente em Clipping Strawberry"
-
-
-# stub query usada só para forçar inclusão do Clipping no type_map
-import strawberry  # noqa: E402
-from typing import Optional  # noqa: E402
-
-from graphql_api.schema.types.clipping import Clipping  # noqa: E402
-
-
-@strawberry.type
-class _StubQuery:
-    @strawberry.field
-    def first_clipping(self) -> Optional[Clipping]:
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -347,3 +339,24 @@ class TestFirestoreDatasourceUsesPydantic:
             "push": False,
         }
         assert clipping.created_at == NOW
+
+    def test_datasource_uses_conftest_helper_camel(self):
+        """Regressao explicita: helper de conftest produz docs camelCase
+        que o datasource deve parsear corretamente (sem perder campos).
+        """
+        from tests.conftest import make_firestore_clipping_doc_camel
+
+        doc = MagicMock()
+        doc.id = "clip-helper"
+        doc.exists = True
+        doc.to_dict.return_value = make_firestore_clipping_doc_camel(
+            scheduleTime="07:30"
+        )
+        db = self._mock_db([doc])
+
+        ds = FirestoreDatasource(db)
+        result = ds.get_clippings("user-123")
+
+        assert len(result) == 1
+        assert result[0].schedule_time == "07:30"
+        assert result[0].delivery_channels is not None
