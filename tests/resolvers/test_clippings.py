@@ -6,6 +6,7 @@ import strawberry
 from strawberry.test import BaseGraphQLTestClient
 
 from graphql_api.context import GraphQLContext, User
+from graphql_api.dataloaders import create_subscription_loader
 from graphql_api.datasources.firestore import (
     ClippingData,
     MyClippingResult,
@@ -233,6 +234,133 @@ class TestClippingMutations:
         )
         assert result.errors is None, f"Errors: {result.errors}"
         assert result.data["updateClipping"]["name"] == "Updated"
+
+
+class TestClippingContextFields:
+    """Fase A3: campos contextuais `isAuthor` e `mySubscription`."""
+
+    def _ctx_with_loader(self, ds, user_id="user-123"):
+        ctx = GraphQLContext(firestore_ds=ds)
+        ctx.user = User(id=user_id, email="t@e.com")
+        # Dataloader injetado no contexto
+        ctx.subscription_loader = create_subscription_loader(ds)
+        return ctx
+
+    def test_my_clippings_query_returns_authored_and_subscribed(self, mock_firestore_ds):
+        """user-123 tem 1 sub author + 1 subscriber → 2 clippings na lista."""
+        mock_firestore_ds.get_my_clippings.return_value = [
+            MyClippingResult(
+                clipping=_sample_clipping_data(id="clip-own"),
+                subscription=_sample_subscription(clipping_id="clip-own", role="author"),
+            ),
+            MyClippingResult(
+                clipping=_sample_clipping_data(id="clip-sub"),
+                subscription=_sample_subscription(clipping_id="clip-sub", role="subscriber"),
+            ),
+        ]
+        result = test_schema.execute_sync(
+            "{ clippings { id } }",
+            context_value=self._ctx_with_loader(mock_firestore_ds),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        ids = {c["id"] for c in result.data["clippings"]}
+        assert ids == {"clip-own", "clip-sub"}
+
+    def test_clipping_is_author_true_for_author(self, mock_firestore_ds):
+        mock_firestore_ds.get_my_clippings.return_value = [
+            MyClippingResult(
+                clipping=_sample_clipping_data(id="clip-1", author_user_id="user-123"),
+                subscription=_sample_subscription(role="author"),
+            )
+        ]
+        result = test_schema.execute_sync(
+            "{ clippings { id isAuthor } }",
+            context_value=self._ctx_with_loader(mock_firestore_ds),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["clippings"][0]["isAuthor"] is True
+
+    def test_clipping_is_author_false_for_subscriber(self, mock_firestore_ds):
+        mock_firestore_ds.get_my_clippings.return_value = [
+            MyClippingResult(
+                clipping=_sample_clipping_data(id="clip-1", author_user_id="other-user"),
+                subscription=_sample_subscription(role="subscriber"),
+            )
+        ]
+        result = test_schema.execute_sync(
+            "{ clippings { id isAuthor } }",
+            context_value=self._ctx_with_loader(mock_firestore_ds),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["clippings"][0]["isAuthor"] is False
+
+    def test_clipping_my_subscription_returns_subscription(self, mock_firestore_ds):
+        sub = _sample_subscription(clipping_id="clip-1", role="subscriber")
+        mock_firestore_ds.get_my_clippings.return_value = [
+            MyClippingResult(
+                clipping=_sample_clipping_data(id="clip-1"),
+                subscription=sub,
+            )
+        ]
+        mock_firestore_ds.get_subscriptions_for_user_and_clippings.return_value = {
+            "clip-1": sub
+        }
+        result = test_schema.execute_sync(
+            """
+            {
+                clippings {
+                    id
+                    mySubscription { id role deliveryChannels { email telegram push } }
+                }
+            }
+            """,
+            context_value=self._ctx_with_loader(mock_firestore_ds),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        my_sub = result.data["clippings"][0]["mySubscription"]
+        assert my_sub is not None
+        assert my_sub["role"] == "SUBSCRIBER"
+        assert my_sub["deliveryChannels"]["email"] is True
+
+    def test_clipping_my_subscription_null_when_not_subscribed(self, mock_firestore_ds):
+        """Clipping retornado por `clipping(id)` (público) sem sub do user."""
+        mock_firestore_ds.get_clipping.return_value = _sample_clipping_data(id="clip-pub")
+        mock_firestore_ds.get_subscriptions_for_user_and_clippings.return_value = {}
+        result = test_schema.execute_sync(
+            """
+            query($id: String!) {
+                clipping(id: $id) {
+                    id
+                    mySubscription { id }
+                }
+            }
+            """,
+            variable_values={"id": "clip-pub"},
+            context_value=self._ctx_with_loader(mock_firestore_ds),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["clipping"]["mySubscription"] is None
+
+    def test_my_subscription_uses_dataloader_no_n_plus_1(self, mock_firestore_ds):
+        """5 clippings em uma query → 1 chamada ao datasource para subs."""
+        mock_firestore_ds.get_my_clippings.return_value = [
+            MyClippingResult(
+                clipping=_sample_clipping_data(id=f"clip-{i}"),
+                subscription=_sample_subscription(clipping_id=f"clip-{i}"),
+            )
+            for i in range(5)
+        ]
+        mock_firestore_ds.get_subscriptions_for_user_and_clippings.return_value = {
+            f"clip-{i}": _sample_subscription(clipping_id=f"clip-{i}") for i in range(5)
+        }
+        result = test_schema.execute_sync(
+            "{ clippings { id mySubscription { id } } }",
+            context_value=self._ctx_with_loader(mock_firestore_ds),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert len(result.data["clippings"]) == 5
+        # Assertção explícita anti-N+1: 1 (e apenas 1) chamada de query subs.
+        assert mock_firestore_ds.get_subscriptions_for_user_and_clippings.call_count == 1
 
 
 class TestClippingEstimate:

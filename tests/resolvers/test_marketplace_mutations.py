@@ -192,6 +192,81 @@ class TestLikeToggle:
         assert "UNAUTHENTICATED" in str(result.errors[0].message)
 
 
+class TestFollowMarketplaceListingDeprecation:
+    """Fase A3: `followMarketplaceListing` deprecada em favor de
+    `subscribeToClipping`. Mantém-se funcional para compat com clientes legados.
+    """
+
+    def test_follow_marketplace_listing_marked_deprecated(self):
+        """Schema introspection deve marcar a mutation como deprecated."""
+        from graphql_api.schema import schema as full_schema
+
+        result = full_schema.execute_sync(
+            """{
+                __type(name: "Mutation") {
+                    fields(includeDeprecated: true) {
+                        name
+                        isDeprecated
+                        deprecationReason
+                    }
+                }
+            }"""
+        )
+        assert result.errors is None
+        fields = result.data["__type"]["fields"]
+        follow = next(
+            (f for f in fields if f["name"] == "followMarketplaceListing"), None
+        )
+        assert follow is not None, "followMarketplaceListing missing from schema"
+        assert follow["isDeprecated"] is True
+        assert follow["deprecationReason"] is not None
+        assert "subscribeToClipping" in follow["deprecationReason"]
+
+    def test_follow_marketplace_listing_still_works(self):
+        """Backward compat: mutation antiga continua funcional internamente.
+
+        Após A3, `followMarketplaceListing` delega para `subscribe_to_clipping`
+        usando o `sourceClippingId` do listing — mas a interface pública (bool
+        return, listingId arg) é mantida.
+        """
+        ds = _make_mock_ds()
+        # Para o delegado: lookup do listing → sourceClippingId; subscribe ds call.
+        ds.get_marketplace_listing.return_value = {**SAMPLE_LISTING, "sourceClippingId": "clip-src-1"}
+        # subscribe_to_clipping retorna uma SubscriptionData mocka
+        from graphql_api.datasources.firestore import SubscriptionData
+
+        ds.subscribe_to_clipping.return_value = SubscriptionData(
+            id="sub-1",
+            clipping_id="clip-src-1",
+            user_id="user-123",
+            role="subscriber",
+            delivery_channels={
+                "email": True,
+                "telegram": False,
+                "push": False,
+                "webhook": False,
+            },
+            extra_emails=[],
+            webhook_url="",
+            active=True,
+            subscribed_at=NOW,
+        )
+
+        result = test_schema.execute_sync(
+            """
+            mutation($listingId: String!) {
+                followMarketplaceListing(listingId: $listingId)
+            }
+            """,
+            variable_values={"listingId": "listing-1"},
+            context_value=_authenticated_context(ds),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["followMarketplaceListing"] is True
+        # Verifica que delegou para subscribe_to_clipping
+        ds.subscribe_to_clipping.assert_called_once()
+
+
 class TestCloneMarketplaceListing:
     def test_clone_creates_copy(self):
         ds = _make_mock_ds()
