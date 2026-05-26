@@ -26,6 +26,7 @@ from strawberry.types import Info
 from graphql_api.datasources.firestore import (
     DeliveryChannelsData,
     RecorteData,
+    ReleaseData,
     SubscriptionData,
 )
 
@@ -40,6 +41,7 @@ class DeliveryChannelsInput:
     email: bool = False
     telegram: bool = False
     push: bool = False
+    webhook: bool = False
 
 
 @pydantic_type(model=RecorteData, all_fields=True)
@@ -104,6 +106,7 @@ def user_subscription_from_data(sub: SubscriptionData) -> UserSubscription:
         email=bool(channels.get("email", False)),
         telegram=bool(channels.get("telegram", False)),
         push=bool(channels.get("push", False)),
+        webhook=bool(channels.get("webhook", False)),
     )
     role = SubscriptionRole(sub.role)
     webhook = sub.webhook_url if sub.webhook_url else None
@@ -117,6 +120,45 @@ def user_subscription_from_data(sub: SubscriptionData) -> UserSubscription:
         webhook_url=webhook,
         active=sub.active,
         subscribed_at=sub.subscribed_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Release (Fase A5)
+# ---------------------------------------------------------------------------
+@pydantic_type(model=ReleaseData)
+class Release:
+    """Entrega historica de um clipping.
+
+    Gerado a partir do `ReleaseData` Pydantic. Campos sao expostos em
+    camelCase pelo Strawberry (conversao automatica de snake_case).
+    `digest` (texto raw) e mantido fora do schema por enquanto — apenas
+    `digestHtml` (renderizado) e exposto.
+    """
+
+    id: strawberry.auto
+    clipping_id: strawberry.auto
+    clipping_name: strawberry.auto
+    digest_html: strawberry.auto
+    articles_count: strawberry.auto
+    created_at: strawberry.auto
+    release_url: strawberry.auto
+    ref_time: strawberry.auto
+    since_hours: strawberry.auto
+
+
+def release_from_data(data: ReleaseData) -> Release:
+    """Constroi o tipo Strawberry `Release` a partir do Pydantic `ReleaseData`."""
+    return Release(
+        id=data.id,
+        clipping_id=data.clipping_id,
+        clipping_name=data.clipping_name,
+        digest_html=data.digest_html,
+        articles_count=data.articles_count,
+        created_at=data.created_at,
+        release_url=data.release_url,
+        ref_time=data.ref_time,
+        since_hours=data.since_hours,
     )
 
 
@@ -187,6 +229,56 @@ class Clipping:
         if sub is None:
             return None
         return user_subscription_from_data(sub)
+
+    @strawberry.field(
+        description=(
+            "Entregas historicas (releases) deste clipping. "
+            "Ordenadas por createdAt desc. Apenas autor ou subscriber podem ver."
+        )
+    )
+    async def releases(
+        self,
+        info: Info,
+        limit: int = 20,
+        before: Optional[datetime] = None,
+    ) -> list["Release"]:
+        ctx = info.context
+        user = getattr(ctx, "user", None)
+        if user is None:
+            raise PermissionError("UNAUTHENTICATED: login obrigatorio para ver releases")
+
+        # Autorizacao: autor pelo `_author_user_id` OU subscriber (via
+        # subscription_loader). Se nao for nenhum dos dois, nega.
+        is_author = (
+            self._author_user_id is not None and user.id == self._author_user_id
+        )
+        is_subscriber = False
+        if not is_author:
+            loader = getattr(ctx, "subscription_loader", None)
+            if loader is not None:
+                sub = await loader.load((user.id, self.id))
+                is_subscriber = sub is not None
+        if not (is_author or is_subscriber):
+            raise PermissionError(
+                "FORBIDDEN: apenas autor ou subscribers podem ver releases"
+            )
+
+        # Clamp limit no intervalo [1, 100] para evitar abuso.
+        safe_limit = max(1, min(int(limit), 100))
+
+        releases_loader = getattr(ctx, "releases_loader", None)
+        if releases_loader is None:
+            # Fallback direto ao datasource (testes sem context dataloader).
+            ds = getattr(ctx, "firestore_ds", None)
+            if ds is None:
+                return []
+            data_list = ds.get_releases(self.id, limit=safe_limit, before=before)
+        else:
+            data_list = await releases_loader.load(
+                (self.id, safe_limit, before)
+            )
+
+        return [release_from_data(d) for d in data_list]
 
 
 @strawberry.input

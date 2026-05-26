@@ -39,10 +39,10 @@ from pydantic import BaseModel, ConfigDict, Field
 class DeliveryChannelsData(BaseModel):
     """Sub-modelo dos canais de entrega.
 
-    Note: deliberadamente *sem* `webhook` nesta fase. A2 mantém o modelo
-    Pydantic enxuto; A5 adicionará `webhook` ao schema. No nível do Firestore,
-    a subscription guarda um dict livre que pode incluir `webhook` (ver
-    `SubscriptionData.delivery_channels`).
+    Fase A5: `webhook` adicionado. Quando `webhook=True`, a subscription
+    correspondente deve ter `webhook_url` não vazio (validação cross-field
+    fica no resolver, não aqui — o modelo aceita o estado inconsistente
+    para permitir parsing defensivo de docs antigos).
     """
 
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
@@ -50,6 +50,7 @@ class DeliveryChannelsData(BaseModel):
     email: bool = False
     telegram: bool = False
     push: bool = False
+    webhook: bool = False
 
 
 class RecorteData(BaseModel):
@@ -137,6 +138,36 @@ class MyClippingResult:
 
     clipping: ClippingData
     subscription: SubscriptionData
+
+
+class ReleaseData(BaseModel):
+    """Modelo canonico de um release (top-level `releases/{id}`).
+
+    Releases sao entregas historicas de um clipping: um digest gerado
+    periodicamente conforme `schedule`. O portal grava esses docs como
+    parte do worker de envio. graphql-api so le.
+
+    Estrutura observada no Firestore producao (camelCase):
+      `releases/{id}` -> { clippingId, userId, clippingName, digest,
+        digestHtml, articlesCount, createdAt, releaseUrl, refTime,
+        sinceHours }
+
+    `createdAt` e o cursor canonico para paginacao (ordenacao desc).
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    id: str
+    clipping_id: str = Field(alias="clippingId")
+    user_id: str = Field(default="", alias="userId")
+    clipping_name: str = Field(default="", alias="clippingName")
+    digest: str = ""
+    digest_html: str = Field(default="", alias="digestHtml")
+    articles_count: int = Field(default=0, alias="articlesCount")
+    created_at: Optional[datetime] = Field(default=None, alias="createdAt")
+    release_url: Optional[str] = Field(default=None, alias="releaseUrl")
+    ref_time: Optional[datetime] = Field(default=None, alias="refTime")
+    since_hours: Optional[int] = Field(default=None, alias="sinceHours")
 
 
 class MarketplaceListingData(BaseModel):
@@ -508,6 +539,62 @@ class FirestoreDatasource:
             )
         self._subscriptions_ref().document(sub.id).delete()
         return True
+
+    # -- refs: releases -----------------------------------------------------
+    def _releases_ref(self):
+        return self._db.collection("releases")
+
+    @staticmethod
+    def _doc_to_release(doc_id: str, data: dict) -> ReleaseData:
+        return ReleaseData.model_validate({"id": doc_id, **(data or {})})
+
+    def get_releases(
+        self,
+        clipping_id: str,
+        limit: int = 20,
+        before: Optional[datetime] = None,
+    ) -> list[ReleaseData]:
+        """Lista releases de um clipping, ordenados por `createdAt` desc.
+
+        - `limit`: maximo de docs retornados.
+        - `before`: cursor opcional; retorna apenas releases com
+          `createdAt < before` (paginacao forward).
+
+        Nao filtra por autorizacao — quem chama deve validar.
+        """
+        query = (
+            self._releases_ref()
+            .where("clippingId", "==", clipping_id)
+            .order_by("createdAt", direction="DESCENDING")
+        )
+        if before is not None:
+            query = query.where("createdAt", "<", before)
+        query = query.limit(limit)
+        return [self._doc_to_release(d.id, d.to_dict()) for d in query.stream()]
+
+    def get_releases_batch(
+        self,
+        clipping_ids: list[str],
+        limit: int = 20,
+        before: Optional[datetime] = None,
+    ) -> dict[str, list[ReleaseData]]:
+        """Batch loader para releases de varios clippings.
+
+        Implementacao defensiva: faz N queries (uma por clipping_id) em vez
+        de uma unica com `where in [...]`, pois o operador `in` do Firestore
+        limita a 30 elementos e nao se combina bem com `order_by`+`limit`
+        per-group. Cada query retorna no maximo `limit` docs, ordenados
+        por `createdAt` desc.
+
+        Retorna `{clipping_id: [ReleaseData...]}` — chave sempre presente,
+        mesmo quando lista vazia.
+        """
+        if not clipping_ids:
+            return {}
+        result: dict[str, list[ReleaseData]] = {}
+        for cid in clipping_ids:
+            result[cid] = self.get_releases(cid, limit=limit, before=before)
+        return result
 
     def update_my_subscription(
         self,

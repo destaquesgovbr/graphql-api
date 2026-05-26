@@ -47,6 +47,7 @@ def _to_graphql_clipping(data: ClippingData) -> Clipping:
             email=data.delivery_channels.get("email", False),
             telegram=data.delivery_channels.get("telegram", False),
             push=data.delivery_channels.get("push", False),
+            webhook=data.delivery_channels.get("webhook", False),
         )
 
     return Clipping(
@@ -128,15 +129,46 @@ def _input_to_dict(input: ClippingInput) -> dict:
 def _channels_input_to_dict(channels: DeliveryChannelsInput) -> dict:
     """Converte `DeliveryChannelsInput` para dict (canônico no Firestore).
 
-    Inclui `webhook=False` por compat com modelo de subscription (A5 vai
-    expor `webhook` no input; por enquanto sempre False).
+    A5: `webhook` agora vem do input. A validacao cross-field (webhook=True
+    requer `webhookUrl` https) eh feita em `_validate_subscription_webhook`.
     """
     return {
         "email": channels.email,
         "telegram": channels.telegram,
         "push": channels.push,
-        "webhook": False,
+        "webhook": channels.webhook,
     }
+
+
+# Fase A5: limites de validacao webhook
+_WEBHOOK_URL_MAX_LENGTH = 2048
+
+
+def _validate_subscription_webhook(
+    channels: DeliveryChannelsInput, webhook_url: Optional[str]
+) -> None:
+    """Valida regras cross-field para webhook delivery channel.
+
+    - `channels.webhook=True` exige `webhook_url` nao vazio.
+    - `webhook_url`, se presente, deve comecar com `https://`.
+    - `webhook_url` tem limite de `_WEBHOOK_URL_MAX_LENGTH` chars.
+
+    Lanca `ValueError` com mensagem em portugues; o resolver re-emite como
+    erro GraphQL bem-formado (nao 500).
+    """
+    url = webhook_url or ""
+    if channels.webhook:
+        if not url:
+            raise ValueError(
+                "webhookUrl obrigatorio quando deliveryChannels.webhook=True"
+            )
+    if url:
+        if len(url) > _WEBHOOK_URL_MAX_LENGTH:
+            raise ValueError(
+                f"webhookUrl excede o limite de {_WEBHOOK_URL_MAX_LENGTH} caracteres"
+            )
+        if not url.startswith("https://"):
+            raise ValueError("webhookUrl deve usar https:// (TLS obrigatorio)")
 
 
 @strawberry.type
@@ -256,6 +288,8 @@ class ClippingMutation:
         ctx = info.context
         ds = ctx.firestore_ds
         user_id = ctx.user.id
+        # A5: validacao cross-field webhook+webhookUrl antes do datasource.
+        _validate_subscription_webhook(input.delivery_channels, input.webhook_url)
         sub = ds.subscribe_to_clipping(
             user_id=user_id,
             clipping_id=input.clipping_id,
@@ -294,6 +328,8 @@ class ClippingMutation:
         ctx = info.context
         ds = ctx.firestore_ds
         user_id = ctx.user.id
+        # A5: validacao cross-field webhook+webhookUrl antes do datasource.
+        _validate_subscription_webhook(channels, webhook_url)
         sub = ds.update_my_subscription(
             user_id=user_id,
             clipping_id=clipping_id,

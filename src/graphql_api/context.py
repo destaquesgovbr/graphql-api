@@ -42,11 +42,17 @@ class GraphQLContext(BaseContext):
         # houver firestore_ds. Mantém-se Optional para os testes que injetam
         # contexto manualmente sem dataloader.
         self.subscription_loader: Optional[Any] = None
+        # Fase A5: dataloader de releases (batch por clipping_id).
+        self.releases_loader: Optional[Any] = None
         if firestore_ds is not None:
             # Import local para evitar ciclo (dataloaders importa firestore).
-            from graphql_api.dataloaders import create_subscription_loader
+            from graphql_api.dataloaders import (
+                create_releases_loader,
+                create_subscription_loader,
+            )
 
             self.subscription_loader = create_subscription_loader(firestore_ds)
+            self.releases_loader = create_releases_loader(firestore_ds)
 
     @property
     def is_authenticated(self) -> bool:
