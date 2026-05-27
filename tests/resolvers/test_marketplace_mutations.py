@@ -101,7 +101,10 @@ LIKE_MUTATION = """
 
 CLONE_MUTATION = """
     mutation($listingId: String!) {
-        cloneMarketplaceListing(listingId: $listingId)
+        cloneMarketplaceListing(listingId: $listingId) {
+            id
+            name
+        }
     }
 """
 
@@ -269,14 +272,32 @@ class TestFollowMarketplaceListingDeprecation:
 
 class TestCloneMarketplaceListing:
     def test_clone_creates_copy(self):
+        # Gap-fix pre-rollout: cloneMarketplaceListing agora retorna Clipping!
+        # (antes Boolean!). O datasource retorna ClippingData; mock atualizado.
+        from graphql_api.datasources.firestore import ClippingData
+
         ds = _make_mock_ds()
+        ds.clone_marketplace_listing.return_value = ClippingData.model_validate(
+            {
+                "id": "clip-novo-1",
+                "name": "Clone Top Economia",
+                "description": "Clone",
+                "recortes": [],
+                "active": True,
+                "author_user_id": "user-123",
+                "schedule": "0 8 * * *",
+                "next_run_at": NOW,
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
+        )
         result = test_schema.execute_sync(
             CLONE_MUTATION,
             variable_values={"listingId": "listing-1"},
             context_value=_authenticated_context(ds),
         )
         assert result.errors is None, f"Errors: {result.errors}"
-        assert result.data["cloneMarketplaceListing"] is True
+        assert result.data["cloneMarketplaceListing"]["id"] == "clip-novo-1"
         ds.clone_marketplace_listing.assert_called_once_with("user-123", "listing-1")
 
     def test_clone_unauthenticated_fails(self):
