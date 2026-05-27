@@ -19,7 +19,6 @@ from graphql_api.context import GraphQLContext, User
 from graphql_api.dataloaders import create_releases_loader, create_subscription_loader
 from graphql_api.datasources.firestore import (
     ClippingData,
-    MyClippingResult,
     ReleaseData,
     SubscriptionData,
 )

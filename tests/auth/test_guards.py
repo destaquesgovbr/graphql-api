@@ -4,7 +4,7 @@ from strawberry.permission import PermissionExtension
 from strawberry.types import Info
 
 from graphql_api.auth.guards import IsAuthenticated, IsInternal
-from graphql_api.context import GraphQLContext, User, ServiceAccount
+from graphql_api.context import GraphQLContext, ServiceAccount, User
 
 
 def _make_schema(permission_class):

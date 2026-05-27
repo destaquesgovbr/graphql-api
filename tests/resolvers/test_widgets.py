@@ -8,10 +8,7 @@ from graphql_api.schema.resolvers.health import HealthQuery
 from graphql_api.schema.resolvers.widgets import (
     MAX_PER_PAGE,
     WidgetQuery,
-    resolve_widget_articles,
-    resolve_widget_config,
 )
-from graphql_api.schema.types.widget import WidgetConfigInput, WidgetLayout
 
 
 @strawberry.type

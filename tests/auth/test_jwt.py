@@ -6,7 +6,6 @@ import pytest
 from graphql_api.auth.jwt import verify_jwt
 from graphql_api.context import User
 
-
 JWKS_URL = "https://accounts.example.com/.well-known/jwks.json"
 
 

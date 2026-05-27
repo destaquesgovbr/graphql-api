@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
-import pytest
 import typesense.exceptions
 
 from graphql_api.datasources.typesense import TypesenseDatasource

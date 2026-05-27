@@ -6,7 +6,6 @@ camelCase (Firestore) <-> snake_case (Python), com `populate_by_name=True`.
 
 from datetime import datetime, timezone
 from typing import Optional
-from unittest.mock import MagicMock
 
 import pytest
 import strawberry

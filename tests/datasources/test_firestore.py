@@ -11,14 +11,13 @@ Estrutura canônica (§8.0 do plano):
 """
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import pytest
 
 from graphql_api.datasources.firestore import (
     ClippingData,
     FirestoreDatasource,
-    MyClippingResult,
     SubscriptionData,
     UnauthorizedError,
 )
