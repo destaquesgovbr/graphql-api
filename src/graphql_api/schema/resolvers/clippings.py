@@ -1,17 +1,31 @@
+import re
 from typing import Optional
 
 import strawberry
 from strawberry.types import Info
 
 from graphql_api.auth.guards import IsAuthenticated
-from graphql_api.datasources.firestore import ClippingData
+from graphql_api.datasources.firestore import ClippingData, UnauthorizedError
+from graphql_api.lib.cron import is_valid_cron
 from graphql_api.schema.types.clipping import (
     Clipping,
     ClippingInput,
     DeliveryChannels,
+    DeliveryChannelsInput,
     EstimateResult,
     Recorte,
+    SubscribeInput,
+    UserSubscription,
+    user_subscription_from_data,
 )
+
+# Regex pragmático para email — mesmo conjunto usado em pyfilters; não pretende
+# ser RFC 5322 completo, só rejeitar lixo óbvio antes de cair no datasource.
+_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+
+# Limite arbitrário do plano A4: cada clipping pode endereçar até 20 emails
+# externos. Mais que isso vira lista de distribuição (fora do escopo).
+_MAX_EXTRA_EMAILS = 20
 
 
 def _to_graphql_clipping(data: ClippingData) -> Clipping:
@@ -33,6 +47,7 @@ def _to_graphql_clipping(data: ClippingData) -> Clipping:
             email=data.delivery_channels.get("email", False),
             telegram=data.delivery_channels.get("telegram", False),
             push=data.delivery_channels.get("push", False),
+            webhook=data.delivery_channels.get("webhook", False),
         )
 
     return Clipping(
@@ -41,12 +56,38 @@ def _to_graphql_clipping(data: ClippingData) -> Clipping:
         description=data.description,
         recortes=recortes,
         prompt=data.prompt,
+        schedule=data.schedule or "",
         schedule_time=data.schedule_time,
+        next_run_at=data.next_run_at,
+        start_date=data.start_date,
+        end_date=data.end_date,
+        extra_emails=list(data.extra_emails or []),
+        include_history=bool(data.include_history),
         delivery_channels=delivery_channels,
         active=data.active,
         created_at=data.created_at,
         updated_at=data.updated_at,
+        _author_user_id=data.author_user_id,
     )
+
+
+def _validate_schedule_input(input: ClippingInput) -> None:
+    """Valida campos cron-relacionados do input. Lança ValueError com mensagem
+    voltada ao usuário; o resolver re-emite como erro GraphQL.
+    """
+    if not is_valid_cron(input.schedule):
+        raise ValueError(
+            f"schedule inválido: '{input.schedule}' não é uma expressão cron de 5 campos"
+        )
+
+    if input.extra_emails:
+        if len(input.extra_emails) > _MAX_EXTRA_EMAILS:
+            raise ValueError(
+                f"extraEmails excede o limite máximo de {_MAX_EXTRA_EMAILS} endereços"
+            )
+        for email in input.extra_emails:
+            if not _EMAIL_RE.match(email):
+                raise ValueError(f"email inválido em extraEmails: '{email}'")
 
 
 def _input_to_dict(input: ClippingInput) -> dict:
@@ -67,7 +108,12 @@ def _input_to_dict(input: ClippingInput) -> dict:
         "description": input.description,
         "recortes": recortes,
         "prompt": input.prompt,
+        "schedule": input.schedule,
         "schedule_time": input.schedule_time,
+        "start_date": input.start_date,
+        "end_date": input.end_date,
+        "extra_emails": list(input.extra_emails or []),
+        "include_history": bool(input.include_history) if input.include_history is not None else False,
     }
 
     if input.delivery_channels is not None:
@@ -80,18 +126,65 @@ def _input_to_dict(input: ClippingInput) -> dict:
     return result
 
 
+def _channels_input_to_dict(channels: DeliveryChannelsInput) -> dict:
+    """Converte `DeliveryChannelsInput` para dict (canônico no Firestore).
+
+    A5: `webhook` agora vem do input. A validacao cross-field (webhook=True
+    requer `webhookUrl` https) eh feita em `_validate_subscription_webhook`.
+    """
+    return {
+        "email": channels.email,
+        "telegram": channels.telegram,
+        "push": channels.push,
+        "webhook": channels.webhook,
+    }
+
+
+# Fase A5: limites de validacao webhook
+_WEBHOOK_URL_MAX_LENGTH = 2048
+
+
+def _validate_subscription_webhook(
+    channels: DeliveryChannelsInput, webhook_url: Optional[str]
+) -> None:
+    """Valida regras cross-field para webhook delivery channel.
+
+    - `channels.webhook=True` exige `webhook_url` nao vazio.
+    - `webhook_url`, se presente, deve comecar com `https://`.
+    - `webhook_url` tem limite de `_WEBHOOK_URL_MAX_LENGTH` chars.
+
+    Lanca `ValueError` com mensagem em portugues; o resolver re-emite como
+    erro GraphQL bem-formado (nao 500).
+    """
+    url = webhook_url or ""
+    if channels.webhook:
+        if not url:
+            raise ValueError(
+                "webhookUrl obrigatorio quando deliveryChannels.webhook=True"
+            )
+    if url:
+        if len(url) > _WEBHOOK_URL_MAX_LENGTH:
+            raise ValueError(
+                f"webhookUrl excede o limite de {_WEBHOOK_URL_MAX_LENGTH} caracteres"
+            )
+        if not url.startswith("https://"):
+            raise ValueError("webhookUrl deve usar https:// (TLS obrigatorio)")
+
+
 @strawberry.type
 class ClippingQuery:
     @strawberry.field(
-        description="Lista todos os clippings do usuario autenticado",
+        description="Lista todos os clippings do usuario autenticado (autorados + inscritos)",
         permission_classes=[IsAuthenticated],
     )
     def clippings(self, info: Info) -> list[Clipping]:
         ctx = info.context
         ds = ctx.firestore_ds
         user_id = ctx.user.id
-        items = ds.get_clippings(user_id)
-        return [_to_graphql_clipping(c) for c in items]
+        # A2: get_my_clippings retorna [(ClippingData, SubscriptionData)].
+        # A3: `isAuthor` e `mySubscription` resolvem via campos contextuais.
+        results = ds.get_my_clippings(user_id)
+        return [_to_graphql_clipping(r.clipping) for r in results]
 
     @strawberry.field(
         description="Busca um clipping por ID",
@@ -100,8 +193,9 @@ class ClippingQuery:
     def clipping(self, info: Info, id: str) -> Optional[Clipping]:
         ctx = info.context
         ds = ctx.firestore_ds
-        user_id = ctx.user.id
-        data = ds.get_clipping(user_id, id)
+        # A2: get_clipping é top-level, não exige user_id no path.
+        # Autorização granular fica para A3 quando expusermos mySubscription.
+        data = ds.get_clipping(id)
         if data is None:
             return None
         return _to_graphql_clipping(data)
@@ -132,6 +226,8 @@ class ClippingMutation:
         ctx = info.context
         ds = ctx.firestore_ds
         user_id = ctx.user.id
+        # A4: validar schedule + extraEmails antes de tocar o datasource.
+        _validate_schedule_input(input)
         data = _input_to_dict(input)
         result = ds.create_clipping(user_id, data)
         return _to_graphql_clipping(result)
@@ -144,7 +240,24 @@ class ClippingMutation:
         ctx = info.context
         ds = ctx.firestore_ds
         user_id = ctx.user.id
+        # A4: validar schedule + extraEmails antes de tocar o datasource.
+        _validate_schedule_input(input)
         data = _input_to_dict(input)
+        # Calcular nextRunAt *no resolver* também — assim o teste de mock
+        # pode inspecionar `data["next_run_at"]` sem depender da
+        # implementação real do datasource. O datasource também calcula
+        # (idempotente).
+        from datetime import datetime, timezone
+
+        from graphql_api.lib.cron import calculate_next_run
+
+        if data.get("schedule"):
+            data["next_run_at"] = calculate_next_run(
+                data["schedule"],
+                datetime.now(tz=timezone.utc),
+                start_date=data.get("start_date"),
+                end_date=data.get("end_date"),
+            )
         result = ds.update_clipping(user_id, id, data)
         return _to_graphql_clipping(result)
 
@@ -165,3 +278,65 @@ class ClippingMutation:
     def send_clipping(self, info: Info, id: str) -> bool:
         # Placeholder: would trigger the actual send pipeline
         return True
+
+    # -- Subscription mutations (Fase A3) -----------------------------------
+    @strawberry.mutation(
+        description="Inscreve o usuário autenticado em um clipping (role=subscriber)",
+        permission_classes=[IsAuthenticated],
+    )
+    def subscribe_to_clipping(self, info: Info, input: SubscribeInput) -> UserSubscription:
+        ctx = info.context
+        ds = ctx.firestore_ds
+        user_id = ctx.user.id
+        # A5: validacao cross-field webhook+webhookUrl antes do datasource.
+        _validate_subscription_webhook(input.delivery_channels, input.webhook_url)
+        sub = ds.subscribe_to_clipping(
+            user_id=user_id,
+            clipping_id=input.clipping_id,
+            channels=_channels_input_to_dict(input.delivery_channels),
+            extra_emails=list(input.extra_emails or []),
+            webhook_url=input.webhook_url or "",
+        )
+        return user_subscription_from_data(sub)
+
+    @strawberry.mutation(
+        description="Remove a inscrição do usuário em um clipping",
+        permission_classes=[IsAuthenticated],
+    )
+    def unsubscribe_from_clipping(self, info: Info, clipping_id: str) -> bool:
+        ctx = info.context
+        ds = ctx.firestore_ds
+        user_id = ctx.user.id
+        try:
+            return ds.unsubscribe_from_clipping(user_id, clipping_id)
+        except UnauthorizedError as exc:
+            # Autor não pode self-unsubscribe — propagar como erro GraphQL
+            raise PermissionError(str(exc)) from exc
+
+    @strawberry.mutation(
+        description="Atualiza canais de entrega da inscrição do usuário",
+        permission_classes=[IsAuthenticated],
+    )
+    def update_my_subscription(
+        self,
+        info: Info,
+        clipping_id: str,
+        channels: DeliveryChannelsInput,
+        extra_emails: Optional[list[str]] = None,
+        webhook_url: Optional[str] = None,
+    ) -> Optional[UserSubscription]:
+        ctx = info.context
+        ds = ctx.firestore_ds
+        user_id = ctx.user.id
+        # A5: validacao cross-field webhook+webhookUrl antes do datasource.
+        _validate_subscription_webhook(channels, webhook_url)
+        sub = ds.update_my_subscription(
+            user_id=user_id,
+            clipping_id=clipping_id,
+            channels=_channels_input_to_dict(channels),
+            extra_emails=list(extra_emails or []),
+            webhook_url=webhook_url or "",
+        )
+        if sub is None:
+            return None
+        return user_subscription_from_data(sub)

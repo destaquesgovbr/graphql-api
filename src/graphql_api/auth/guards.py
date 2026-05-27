@@ -1,6 +1,5 @@
 import typing
 
-import strawberry
 from strawberry.permission import BasePermission
 from strawberry.types import Info
 

@@ -3,8 +3,6 @@ from typing import Optional
 
 import httpx
 import jwt
-from jwt import PyJWKClient, PyJWK
-from jwcrypto import jwk as jwcrypto_jwk
 
 from graphql_api.context import User
 

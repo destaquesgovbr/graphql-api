@@ -53,8 +53,6 @@ def app(mock_typesense_ds):
     application = create_app()
 
     # Override context to inject mock datasource
-    original_context_getter = None
-
     async def mock_context():
         ctx = GraphQLContext(typesense_ds=mock_typesense_ds)
         return ctx

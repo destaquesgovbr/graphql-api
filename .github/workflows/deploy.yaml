@@ -1,0 +1,24 @@
+name: Build and Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/graphql_api/**"
+      - "Dockerfile"
+      - "pyproject.toml"
+      - ".github/workflows/deploy.yaml"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    uses: destaquesgovbr/reusable-workflows/.github/workflows/cloud-run-deploy.yml@v2
+    with:
+      dockerfile: Dockerfile
+      ar_repository: destaquesgovbr-graphql-api
+      image_name: graphql-api
+      cloud_run_service: destaquesgovbr-graphql-api

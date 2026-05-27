@@ -1,10 +1,9 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
 from graphql_api.auth.service_account import verify_service_account
 from graphql_api.context import ServiceAccount
-
 
 AUDIENCE = "https://dgb-api.example.com"
 

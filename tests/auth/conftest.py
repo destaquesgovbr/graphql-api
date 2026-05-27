@@ -3,8 +3,8 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 import pytest
-from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from jwcrypto import jwk as jwcrypto_jwk
 
 

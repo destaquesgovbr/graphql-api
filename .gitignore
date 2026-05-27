@@ -1,18 +1,12 @@
 __pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-dist/
-build/
-.eggs/
-*.egg
+*.pyc
 .venv/
-venv/
-.env
-.env.*
-!.env.example
 .pytest_cache/
 .coverage
 htmlcov/
 .ruff_cache/
 .mypy_cache/
+
+# Local plan and operational notes (not for public repo)
+_plan/
+.claude/

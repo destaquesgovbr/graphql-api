@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from graphql_api.datasources.postgres import PostgresDatasource, _UPSERT_FEATURES_SQL
+from graphql_api.datasources.postgres import _UPSERT_FEATURES_SQL, PostgresDatasource
 
 
 def _make_mock_pool():

@@ -1,3 +1,16 @@
+"""Tipos Strawberry para marketplace.
+
+Fase A1: `MarketplaceListing` continua sendo definido manualmente como
+`@strawberry.type` porque carrega campos contextuais (`has_liked`,
+`has_followed`) que sao calculados pelo resolver e nao existem no modelo
+Pydantic da fronteira Firestore (`MarketplaceListingData`).
+
+`MarketplaceRecorte` poderia ser gerado a partir de `RecorteData`, mas
+permanece manual aqui para nao misturar a hierarquia de tipos do clipping com
+a do marketplace — duas listas independentes que podem evoluir de forma
+diferente (ex.: campos analytics no recorte do marketplace).
+"""
+
 from datetime import datetime
 from typing import Optional
 
