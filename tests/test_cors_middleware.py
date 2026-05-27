@@ -7,25 +7,26 @@ widgets embarcaveis externos (iframes 3rd-party).
 Default `*` para o widget endpoint (publico). Em prod, infra pode setar
 `CORS_ALLOW_ORIGINS=https://destaques.gov.br,https://staging.destaques.gov.br`
 para restringir.
+
+NB: `create_app()` le `CORS_ALLOW_ORIGINS` em tempo de chamada (via
+`os.environ.get`), entao basta setar a env var antes de chamar
+`create_app()` — nao precisa de `importlib.reload` (que quebra
+dependency_overrides em outros testes).
 """
 
 from __future__ import annotations
 
-import importlib
-
 import pytest
 from httpx import ASGITransport, AsyncClient
+
+from graphql_api.app import create_app
 
 
 @pytest.fixture
 def app_default(monkeypatch):
     """Cria app com defaults de CORS (allow_origins=*)."""
     monkeypatch.delenv("CORS_ALLOW_ORIGINS", raising=False)
-    # Reimport para garantir que o create_app pega o env atual.
-    import graphql_api.app as app_module
-
-    importlib.reload(app_module)
-    return app_module.create_app()
+    return create_app()
 
 
 @pytest.fixture
@@ -35,10 +36,7 @@ def app_restricted(monkeypatch):
         "CORS_ALLOW_ORIGINS",
         "https://destaques.gov.br,https://staging.destaques.gov.br",
     )
-    import graphql_api.app as app_module
-
-    importlib.reload(app_module)
-    return app_module.create_app()
+    return create_app()
 
 
 @pytest.mark.asyncio

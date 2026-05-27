@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any, AsyncIterator
 
 from fastapi import Depends, FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from strawberry.fastapi import GraphQLRouter
 
@@ -126,6 +128,29 @@ async def _parse_request_body(request: Request) -> dict[str, Any]:
 
 def create_app() -> FastAPI:
     app = FastAPI(title="DGB GraphQL API", docs_url=None, redoc_url=None)
+
+    # CORS middleware (gap-fix pre-rollout).
+    #
+    # `/graphql/stream` e consumido pelo portal (cross-origin no dev local;
+    # mesma origem em prod). `/graphql` precisa estar acessivel para widgets
+    # embarcaveis externos (iframes 3rd-party). Default `*` e seguro porque
+    # o schema publico (sem JWT) so expoe queries read-only de
+    # noticias/temas/agencias/widgets — mutations e queries autenticadas
+    # exigem header `Authorization`. Em prod, infra pode setar
+    # `CORS_ALLOW_ORIGINS=https://destaques.gov.br,https://staging.destaques.gov.br`
+    # para restringir.
+    cors_origins = [
+        o.strip()
+        for o in os.environ.get("CORS_ALLOW_ORIGINS", "*").split(",")
+        if o.strip()
+    ] or ["*"]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "Accept"],
+        expose_headers=["Cache-Control"],
+    )
 
     async def context_dependency() -> GraphQLContext:
         return await get_graphql_context()

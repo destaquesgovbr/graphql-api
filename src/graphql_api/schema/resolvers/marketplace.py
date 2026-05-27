@@ -4,7 +4,9 @@ import strawberry
 from strawberry.types import Info
 
 from graphql_api.auth.guards import IsAuthenticated
-from graphql_api.datasources.firestore import MarketplaceListingData
+from graphql_api.datasources.firestore import ClippingData, MarketplaceListingData
+from graphql_api.schema.resolvers.clippings import _to_graphql_clipping
+from graphql_api.schema.types.clipping import Clipping
 from graphql_api.schema.types.marketplace import (
     MarketplaceListing,
     MarketplaceListingsResult,
@@ -198,11 +200,27 @@ class MarketplaceMutation:
         return True
 
     @strawberry.mutation(
-        description="Clona um listing do marketplace para os clippings do usuario",
+        description=(
+            "Clona um listing do marketplace para os clippings do usuario. "
+            "Retorna o Clipping recem-criado (gap-fix pre-rollout: era Boolean! "
+            "antes; portal B3 precisa do `id` para redirecionar para "
+            "/minha-conta/clipping/[id])."
+        ),
         permission_classes=[IsAuthenticated],
     )
-    def clone_marketplace_listing(self, info: Info, listing_id: str) -> bool:
+    def clone_marketplace_listing(self, info: Info, listing_id: str) -> Clipping:
         ctx = info.context
         ds = ctx.firestore_ds
         user_id = ctx.user.id
-        return ds.clone_marketplace_listing(user_id, listing_id)
+        result = ds.clone_marketplace_listing(user_id, listing_id)
+        # Aceitamos `ClippingData` (Pydantic) ou dict — o datasource ainda nao
+        # tem implementacao real (so mocks); o contrato e "retorna o clipping
+        # recem-criado". Para retrocompatibilidade defensiva, normalizamos
+        # ambos os formatos.
+        if isinstance(result, ClippingData):
+            return _to_graphql_clipping(result)
+        if isinstance(result, dict):
+            return _to_graphql_clipping(ClippingData.model_validate(result))
+        raise ValueError(
+            "clone_marketplace_listing deve retornar ClippingData ou dict"
+        )
