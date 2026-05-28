@@ -1,13 +1,19 @@
+import logging
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
 from strawberry.fastapi import BaseContext
 
 if TYPE_CHECKING:
+    from fastapi import Request
+
     from graphql_api.datasources.firestore import FirestoreDatasource
     from graphql_api.datasources.postgres import PostgresDatasource
     from graphql_api.datasources.typesense import TypesenseDatasource
     from graphql_api.datasources.typesense_admin import TypesenseAdminDatasource
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -63,5 +69,71 @@ class GraphQLContext(BaseContext):
         return self.service_account is not None
 
 
-async def get_context() -> GraphQLContext:
-    return GraphQLContext()
+def _extract_bearer_token(request: "Request") -> Optional[str]:
+    """Extrai o token do header `Authorization: Bearer <token>`. Case-insensitive."""
+    auth = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    if not auth:
+        return None
+    parts = auth.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    return parts[1].strip() or None
+
+
+async def get_context(request: Optional["Request"] = None) -> GraphQLContext:
+    """Constrói o `GraphQLContext` para um request.
+
+    - Quando `request` é None (testes legacy que patcham este símbolo sem
+      passar args), retorna contexto vazio — compat com mocks pré-lifespan.
+    - Quando `request` é fornecido (path normal via FastAPI dep), lê os
+      datasources de `request.app.state` (populados pelo lifespan em
+      `graphql_api.lifespan`) e tenta resolver o usuário via JWT no header
+      `Authorization`.
+
+    Falhas de auth (token expirado/inválido) deixam `ctx.user = None` —
+    queries públicas continuam funcionando, queries autenticadas falham com
+    UNAUTHENTICATED via `IsAuthenticated` permission.
+    """
+    if request is None:
+        return GraphQLContext()
+
+    state = request.app.state
+    ctx = GraphQLContext(
+        typesense_ds=getattr(state, "typesense_ds", None),
+        firestore_ds=getattr(state, "firestore_ds", None),
+        postgres_ds=getattr(state, "postgres_ds", None),
+        typesense_admin_ds=getattr(state, "typesense_admin_ds", None),
+    )
+
+    token = _extract_bearer_token(request)
+    if token is None:
+        return ctx
+
+    # Auth de usuário (Keycloak JWT). Falha silenciosa: deixa ctx.user=None.
+    jwks_url = os.environ.get("AUTH_JWKS_URL")
+    if jwks_url:
+        try:
+            from graphql_api.auth.jwt import verify_jwt
+
+            issuer = os.environ.get("AUTH_ISSUER")
+            user = await verify_jwt(token, jwks_url, issuer=issuer)
+            if user is not None:
+                ctx.user = user
+                return ctx
+        except Exception as exc:  # pragma: no cover - defensivo
+            logger.warning("falha inesperada validando JWT: %s", exc)
+
+    # Auth de service account (Google OIDC). Apenas quando JWT do user falhou e
+    # `SERVICE_ACCOUNT_AUDIENCE` está configurado.
+    sa_audience = os.environ.get("SERVICE_ACCOUNT_AUDIENCE")
+    if sa_audience:
+        try:
+            from graphql_api.auth.service_account import verify_service_account
+
+            sa = await verify_service_account(token, sa_audience)
+            if sa is not None:
+                ctx.service_account = sa
+        except Exception as exc:  # pragma: no cover - defensivo
+            logger.warning("falha inesperada validando service account: %s", exc)
+
+    return ctx
