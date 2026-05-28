@@ -17,10 +17,55 @@ async def _fetch_jwks(jwks_url: str) -> dict:
         return resp.json()
 
 
-async def verify_jwt(token: str | None, jwks_url: str) -> Optional[User]:
+def _extract_roles(payload: dict) -> list[str]:
+    """Coleta roles do payload do JWT.
+
+    Suporta três formatos:
+    - `roles: [...]` (custom / nosso encoding antigo).
+    - `realm_access.roles: [...]` (Keycloak — roles do realm).
+    - `resource_access.<client_id>.roles: [...]` (Keycloak — roles por client).
+
+    Os três sao mesclados (set-union, ordem preservada via dedupe O(n)). Em
+    Keycloak, o realm `destaquesgovbr` populamos `realm_access.roles`.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(values):
+        if not isinstance(values, list):
+            return
+        for v in values:
+            if isinstance(v, str) and v not in seen:
+                seen.add(v)
+                out.append(v)
+
+    _add(payload.get("roles"))
+
+    realm_access = payload.get("realm_access") or {}
+    if isinstance(realm_access, dict):
+        _add(realm_access.get("roles"))
+
+    resource_access = payload.get("resource_access") or {}
+    if isinstance(resource_access, dict):
+        for client_data in resource_access.values():
+            if isinstance(client_data, dict):
+                _add(client_data.get("roles"))
+
+    return out
+
+
+async def verify_jwt(
+    token: str | None,
+    jwks_url: str,
+    *,
+    issuer: Optional[str] = None,
+) -> Optional[User]:
     """Verify a JWT token using JWKS and return a User or None.
 
-    Validates the exp and iss claims. Returns None for any invalid/missing token.
+    Valida `exp` e `sub` sempre. Quando `issuer` for fornecido, exige `iss`
+    presente e igual (PyJWT faz a comparacao internamente via `issuer=`).
+    `aud` nao e validado (multi-client; cada client tem audience proprio).
+    Retorna None para qualquer token invalido/ausente.
     """
     if token is None:
         return None
@@ -43,17 +88,21 @@ async def verify_jwt(token: str | None, jwks_url: str) -> Optional[User]:
             logger.warning("No matching kid found in JWKS: %s", kid)
             return None
 
-        payload = jwt.decode(
-            token,
-            signing_key,
-            algorithms=["RS256"],
-            options={"require": ["exp", "iss", "sub"], "verify_aud": False},
-        )
+        require_claims = ["exp", "sub"]
+        decode_kwargs: dict = {
+            "algorithms": ["RS256"],
+            "options": {"require": require_claims, "verify_aud": False},
+        }
+        if issuer:
+            decode_kwargs["issuer"] = issuer
+            decode_kwargs["options"]["require"].append("iss")
+
+        payload = jwt.decode(token, signing_key, **decode_kwargs)
 
         return User(
             id=payload["sub"],
             email=payload.get("email", ""),
-            roles=payload.get("roles", []),
+            roles=_extract_roles(payload),
         )
 
     except jwt.ExpiredSignatureError:

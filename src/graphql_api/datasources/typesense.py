@@ -1,8 +1,13 @@
+import json
+import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
 import typesense
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -62,9 +67,66 @@ def _document_to_article(doc: dict) -> ArticleDocument:
 COLLECTION_NAME = "news"
 
 
+def _parse_typesense_conn(env_name: str) -> Optional[dict]:
+    """Le e parseia uma env var no formato JSON `{"host":..., "port":..., "protocol":..., "apiKey":...}`.
+
+    Retorna `None` se a env var estiver ausente ou inválida — o caller decide
+    como tratar (em prod = warning + DS=None; em testes = mock).
+    """
+    raw = os.environ.get(env_name)
+    if not raw:
+        return None
+    try:
+        conn = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.warning("%s nao e JSON valido: %s", env_name, exc)
+        return None
+    if not isinstance(conn, dict):
+        logger.warning("%s parseou para tipo nao-dict: %s", env_name, type(conn))
+        return None
+    return conn
+
+
+def _build_typesense_client(conn: dict, connection_timeout_seconds: int = 5) -> typesense.Client:
+    """Constrói um `typesense.Client` a partir de um dict com host/port/protocol/apiKey.
+
+    Aceita tanto camelCase (`apiKey`) quanto snake_case (`api_key`) — defensivo
+    para inconsistências entre secrets.
+    """
+    api_key = conn.get("apiKey") or conn.get("api_key") or ""
+    host = conn.get("host") or "localhost"
+    port = int(conn.get("port") or 443)
+    protocol = conn.get("protocol") or "https"
+    return typesense.Client(
+        {
+            "api_key": api_key,
+            "nodes": [{"host": host, "port": port, "protocol": protocol}],
+            "connection_timeout_seconds": connection_timeout_seconds,
+        }
+    )
+
+
 class TypesenseDatasource:
     def __init__(self, client: typesense.Client):
         self.client = client
+
+    @classmethod
+    def from_env(cls, env_name: str = "TYPESENSE_READ_CONN") -> Optional["TypesenseDatasource"]:
+        """Cria um datasource a partir da env var (JSON). Retorna None se ausente/inválida.
+
+        Não levanta exceção — falha silenciosa permite que o app suba em dev
+        local sem Typesense configurado (DS=None; resolvers que dependem dele
+        retornam erro de permission/feature unavailable em runtime).
+        """
+        conn = _parse_typesense_conn(env_name)
+        if conn is None:
+            return None
+        try:
+            client = _build_typesense_client(conn)
+        except Exception as exc:  # pragma: no cover - defensivo
+            logger.warning("falha ao construir typesense.Client a partir de %s: %s", env_name, exc)
+            return None
+        return cls(client=client)
 
     def search_articles(
         self,

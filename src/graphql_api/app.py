@@ -23,20 +23,37 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from strawberry.fastapi import GraphQLRouter
 
 from graphql_api.context import GraphQLContext, get_context
+from graphql_api.lifespan import lifespan
 from graphql_api.schema import schema
 
 logger = logging.getLogger(__name__)
 
 
-async def get_graphql_context() -> GraphQLContext:
+async def get_graphql_context(request: Request) -> GraphQLContext:
     """Dependency override-able pelo FastAPI para injecao em testes.
 
-    Em producao retorna o `GraphQLContext()` vazio (auth/JWT serao
-    extraidos do request em fase posterior). Em testes,
-    `app.dependency_overrides[get_graphql_context]` injeta um contexto
-    com `user` populado.
+    Em producao chama `get_context(request)` que:
+      - le datasources de `request.app.state` (populados pelo lifespan);
+      - valida JWT do header `Authorization` e popula `ctx.user`;
+      - falha silenciosa em auth → queries publicas continuam respondendo.
+
+    Em testes, `app.dependency_overrides[get_graphql_context] = factory` injeta
+    um contexto com `user` populado sem precisar passar pelo lifespan/JWT.
+
+    Compat com testes legados que mockam via `patch("graphql_api.app.get_context", mock)`
+    onde `mock` nao aceita `request`: detectamos isso via `inspect.signature` e
+    chamamos sem argumentos. Path normal (producao) chama com request.
     """
-    return await get_context()
+    import inspect
+
+    fn = get_context
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):  # pragma: no cover - C-implementado, raro
+        params = {}
+    if params:
+        return await fn(request)
+    return await fn()
 
 
 def _format_sse_event(event: str, data: str = "") -> str:
@@ -127,7 +144,7 @@ async def _parse_request_body(request: Request) -> dict[str, Any]:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="DGB GraphQL API", docs_url=None, redoc_url=None)
+    app = FastAPI(title="DGB GraphQL API", docs_url=None, redoc_url=None, lifespan=lifespan)
 
     # CORS middleware (gap-fix pre-rollout).
     #
@@ -152,11 +169,11 @@ def create_app() -> FastAPI:
         expose_headers=["Cache-Control"],
     )
 
-    async def context_dependency() -> GraphQLContext:
-        return await get_graphql_context()
-
+    # Strawberry usa o `context_getter` como FastAPI dep. Passar
+    # `get_graphql_context` direto faz com que `dependency_overrides[get_graphql_context]`
+    # tambem funcione no endpoint /graphql (antes so funcionava em /graphql/stream).
     # Queries/mutations apenas — subscriptions migradas para /graphql/stream.
-    graphql_router = GraphQLRouter(schema, context_getter=context_dependency)
+    graphql_router = GraphQLRouter(schema, context_getter=get_graphql_context)
     app.include_router(graphql_router, prefix="/graphql")
 
     @app.api_route("/graphql/stream", methods=["GET", "POST"])

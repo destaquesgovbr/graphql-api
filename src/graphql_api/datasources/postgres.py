@@ -1,7 +1,11 @@
 import json
+import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -292,6 +296,46 @@ def _row_to_typesense_doc(row: dict) -> TypesenseDocRecord:
 class PostgresDatasource:
     def __init__(self, pool):
         self._pool = pool
+
+    @classmethod
+    async def from_env(
+        cls,
+        env_name: str = "DATABASE_URL",
+        min_size: int = 1,
+        max_size: int = 10,
+    ) -> Optional["PostgresDatasource"]:
+        """Cria datasource asyncpg a partir da env var `DATABASE_URL`.
+
+        Retorna None se a env var nao estiver setada ou se a criacao do pool
+        falhar (mantém o app subindo sem Postgres em dev local).
+        """
+        dsn = os.environ.get(env_name)
+        if not dsn:
+            return None
+        try:
+            import asyncpg
+
+            pool = await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size)
+        except Exception as exc:  # pragma: no cover - defensivo
+            logger.warning("falha ao criar pool asyncpg a partir de %s: %s", env_name, exc)
+            return None
+        return cls(pool=pool)
+
+    async def close(self) -> None:
+        """Fecha o pool de conexões (chamado no shutdown do FastAPI)."""
+        pool = self._pool
+        if pool is None:
+            return
+        close = getattr(pool, "close", None)
+        if close is None:
+            return
+        try:
+            result = close()
+            # asyncpg.Pool.close() é async; pools de testes podem ser sync.
+            if hasattr(result, "__await__"):
+                await result
+        except Exception as exc:  # pragma: no cover - defensivo
+            logger.warning("erro ao fechar pool postgres: %s", exc)
 
     async def get_news_by_id(self, unique_id: str) -> Optional[NewsRecord]:
         query = _NEWS_BASE_SQL + " WHERE n.unique_id = $1"

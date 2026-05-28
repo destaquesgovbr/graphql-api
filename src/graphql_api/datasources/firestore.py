@@ -29,11 +29,15 @@ Boundary camelCase/snake_case continua via Pydantic `Field(alias=...)`. Para
 gravar use `model.model_dump(by_alias=True)` (camelCase canônico).
 """
 
+import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+
+logger = logging.getLogger(__name__)
 
 
 class DeliveryChannelsData(BaseModel):
@@ -207,6 +211,36 @@ class FirestoreDatasource:
 
     def __init__(self, db: Any):
         self._db = db
+
+    @classmethod
+    def from_env(
+        cls,
+        project_id_env: str = "GCP_PROJECT_ID",
+        fallback_env: str = "GOOGLE_CLOUD_PROJECT",
+    ) -> Optional["FirestoreDatasource"]:
+        """Cria datasource a partir de env vars de project id.
+
+        Tenta `GCP_PROJECT_ID` primeiro, depois `GOOGLE_CLOUD_PROJECT`. Se nenhum
+        estiver setado, deixa o client tentar ADC (Application Default
+        Credentials) — funciona em Cloud Run, GCE, e localmente com
+        `gcloud auth application-default login`.
+
+        Retorna None se a inicialização do client falhar (mantém o app subindo
+        em dev local sem credenciais).
+        """
+        project_id = os.environ.get(project_id_env) or os.environ.get(fallback_env)
+        try:
+            from google.cloud import firestore as gcp_firestore
+
+            if project_id:
+                client = gcp_firestore.Client(project=project_id)
+            else:
+                # ADC tenta inferir o projeto automaticamente.
+                client = gcp_firestore.Client()
+        except Exception as exc:  # pragma: no cover - defensivo
+            logger.warning("falha ao inicializar FirestoreDatasource: %s", exc)
+            return None
+        return cls(db=client)
 
     # -- refs auxiliares ----------------------------------------------------
     def _clippings_ref(self):
