@@ -7,6 +7,11 @@ htmlcov/
 .ruff_cache/
 .mypy_cache/
 
+# Local env vars (contem secrets reais — NUNCA commitar)
+.env
+.env.local
+.env.*.local
+
 # Local plan and operational notes (not for public repo)
 _plan/
 .claude/

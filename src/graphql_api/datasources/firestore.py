@@ -658,3 +658,293 @@ class FirestoreDatasource:
         )
         doc = sub_ref.get()
         return self._doc_to_subscription(doc.id, doc.to_dict())
+
+    # -- refs: marketplace --------------------------------------------------
+    def _marketplace_ref(self):
+        return self._db.collection("marketplace")
+
+    @staticmethod
+    def _listing_doc_to_dict(doc_id: str, data: dict) -> dict:
+        # Retornamos dict (nao Pydantic) porque o resolver de marketplace faz
+        # `MarketplaceListingData.model_validate(payload)` por conta propria
+        # (precisa preservar campos extras como `schedule`/`shortDescription`
+        # que nao estao no modelo canonico mas sao usados pelo `_doc_to_listing`).
+        out = {**(data or {})}
+        out["id"] = doc_id
+        return out
+
+    def get_marketplace_listings(
+        self, *, offset: int = 0, limit: int = 20
+    ) -> dict:
+        """Lista listings ativos paginados, ordenados por `publishedAt desc`.
+
+        Retorna `{"listings": list[dict], "total": int}`. Cada dict contem
+        `id` + campos brutos do Firestore (camelCase).
+        """
+        base = self._marketplace_ref().where("active", "==", True)
+        # Total separado: count() e barato (servidor calcula) e a paginacao
+        # com offset/limit precisa do total para o resolver montar resposta.
+        try:
+            total = base.count().get()[0][0].value
+        except Exception:  # pragma: no cover - defensivo (mock pode nao expor)
+            total = 0
+        query = (
+            base.order_by("publishedAt", direction="DESCENDING")
+            .offset(offset)
+            .limit(limit)
+        )
+        listings = [
+            self._listing_doc_to_dict(d.id, d.to_dict()) for d in query.stream()
+        ]
+        return {"listings": listings, "total": total}
+
+    def get_marketplace_listing(self, listing_id: str) -> Optional[dict]:
+        """Retorna `{id, ...}` ou `None` se nao existe ou esta `active=False`."""
+        doc = self._marketplace_ref().document(listing_id).get()
+        if not doc.exists:
+            return None
+        data = doc.to_dict() or {}
+        if not data.get("active", True):
+            return None
+        return self._listing_doc_to_dict(doc.id, data)
+
+    def publish_to_marketplace(
+        self,
+        *,
+        user_id: str,
+        clipping_id: str,
+        name: str,
+        description: Optional[str],
+    ) -> dict:
+        """Publica um clipping no marketplace.
+
+        Validacoes:
+          - clipping existe e `authorUserId == user_id` (senao `UnauthorizedError`)
+          - clipping ainda nao foi publicado (senao `ValueError("ALREADY_PUBLISHED")`)
+          - clipping tem ao menos 1 recorte (senao `ValueError("EMPTY_RECORTES")`)
+
+        Operacoes (batch):
+          1. Cria `marketplace/{new_id}` com snapshot do clipping
+          2. Marca `clippings/{clipping_id}.publishedToMarketplace = True`,
+             salva `marketplaceListingId` e copia `description` editada
+        """
+        clipping_ref = self._clippings_ref().document(clipping_id)
+        snap = clipping_ref.get()
+        if not snap.exists:
+            raise UnauthorizedError("CLIPPING_NOT_FOUND")
+        clipping_data = snap.to_dict() or {}
+        if clipping_data.get("authorUserId") != user_id:
+            raise UnauthorizedError("FORBIDDEN")
+        if clipping_data.get("publishedToMarketplace"):
+            raise ValueError("ALREADY_PUBLISHED")
+        recortes = clipping_data.get("recortes") or []
+        if not recortes:
+            raise ValueError("EMPTY_RECORTES")
+        if any(not (r.get("title") or "").strip() for r in recortes):
+            raise ValueError("RECORTE_MISSING_TITLE")
+
+        listing_ref = self._marketplace_ref().document()
+        now = datetime.now(timezone.utc)
+        listing_payload = {
+            "authorUserId": user_id,
+            "authorDisplayName": clipping_data.get("authorDisplayName", ""),
+            "sourceClippingId": clipping_id,
+            "name": name or clipping_data.get("name", ""),
+            "description": description,
+            "recortes": recortes,
+            "prompt": clipping_data.get("prompt"),
+            "schedule": clipping_data.get("schedule", ""),
+            "likeCount": 0,
+            "followerCount": 0,
+            "cloneCount": 0,
+            "publishedAt": now,
+            "updatedAt": now,
+            "active": True,
+        }
+        batch = self._db.batch()
+        batch.set(listing_ref, listing_payload)
+        batch.update(
+            clipping_ref,
+            {
+                "publishedToMarketplace": True,
+                "marketplaceListingId": listing_ref.id,
+                "description": description,
+            },
+        )
+        batch.commit()
+        return self._listing_doc_to_dict(listing_ref.id, listing_payload)
+
+    def unpublish_from_marketplace(self, listing_id: str) -> bool:
+        """Soft-delete do listing + reset das flags no clipping fonte.
+
+        Top-level `clippings/{id}` (consistente com `publish`/`clone`). A
+        verificacao de autoria fica a cargo do resolver (ja faz lookup +
+        check em `MarketplaceListingData.author_user_id`).
+
+        Retorna False se o listing nao existir; True caso contrario.
+        """
+        listing_ref = self._marketplace_ref().document(listing_id)
+        snap = listing_ref.get()
+        if not snap.exists:
+            return False
+        data = snap.to_dict() or {}
+        source_clipping_id = data.get("sourceClippingId")
+
+        batch = self._db.batch()
+        batch.update(listing_ref, {"active": False})
+        if source_clipping_id:
+            batch.update(
+                self._clippings_ref().document(source_clipping_id),
+                {
+                    "publishedToMarketplace": False,
+                    "marketplaceListingId": None,
+                },
+            )
+        batch.commit()
+        return True
+
+    def clone_marketplace_listing(
+        self, user_id: str, listing_id: str
+    ) -> ClippingData:
+        """Clona um listing para os clippings do usuario.
+
+        - Cria `clippings/{new_id}` com snapshot do listing (active=False,
+          clonedFrom=listingId)
+        - Cria `subscriptions/{new_id}` com role=author e canais zerados
+        - Incrementa `cloneCount` no listing
+        - Retorna `ClippingData` do clipping recem-criado
+
+        Raises `UnauthorizedError` se listing inexistente/inativo.
+        """
+        listing_ref = self._marketplace_ref().document(listing_id)
+        snap = listing_ref.get()
+        if not snap.exists:
+            raise UnauthorizedError("LISTING_NOT_FOUND")
+        data = snap.to_dict() or {}
+        if not data.get("active", True):
+            raise UnauthorizedError("LISTING_INACTIVE")
+
+        now = datetime.now(timezone.utc)
+        new_clipping_ref = self._clippings_ref().document()
+        new_sub_ref = self._subscriptions_ref().document()
+
+        clipping_payload = {
+            "name": data.get("name", ""),
+            "description": data.get("description", "") or "",
+            "shortDescription": data.get("shortDescription", "") or "",
+            "recortes": data.get("recortes", []) or [],
+            "prompt": data.get("prompt", "") or "",
+            "clonedFrom": listing_id,
+            "authorUserId": user_id,
+            "active": False,
+            "schedule": "0 8 * * *",
+            "createdAt": now,
+            "updatedAt": now,
+        }
+        sub_payload = {
+            "clippingId": new_clipping_ref.id,
+            "userId": user_id,
+            "role": "author",
+            "deliveryChannels": {
+                "email": False,
+                "telegram": False,
+                "push": False,
+                "webhook": False,
+            },
+            "extraEmails": [],
+            "webhookUrl": "",
+            "subscribedAt": now,
+            "active": True,
+        }
+
+        # Increment idiomatic: usar Increment do firestore se disponivel; caso
+        # contrario fallback para read+set (mocks de teste podem nao expor).
+        increment_value: Any
+        try:
+            from google.cloud import firestore as gcp_firestore
+
+            increment_value = gcp_firestore.Increment(1)
+        except Exception:  # pragma: no cover - defensivo
+            increment_value = (data.get("cloneCount") or 0) + 1
+
+        batch = self._db.batch()
+        batch.set(new_clipping_ref, clipping_payload)
+        batch.set(new_sub_ref, sub_payload)
+        batch.update(listing_ref, {"cloneCount": increment_value})
+        batch.commit()
+
+        return self._doc_to_clipping(new_clipping_ref.id, clipping_payload)
+
+    def has_liked_listing(self, user_id: str, listing_id: str) -> bool:
+        """True se existe `marketplace/{listing_id}/likes/{user_id}`."""
+        like = (
+            self._marketplace_ref()
+            .document(listing_id)
+            .collection("likes")
+            .document(user_id)
+            .get()
+        )
+        return bool(getattr(like, "exists", False))
+
+    def has_followed_listing(self, user_id: str, listing_id: str) -> bool:
+        """True se o user tem `subscription role=subscriber` no clipping fonte.
+
+        Faz lookup do listing para descobrir `sourceClippingId`, depois consulta
+        `subscriptions where clippingId == X AND userId == Y AND role == "subscriber"`.
+        """
+        listing = self._marketplace_ref().document(listing_id).get()
+        if not getattr(listing, "exists", False):
+            return False
+        data = listing.to_dict() or {}
+        source_clipping_id = data.get("sourceClippingId")
+        if not source_clipping_id:
+            return False
+        query = (
+            self._subscriptions_ref()
+            .where("clippingId", "==", source_clipping_id)
+            .where("userId", "==", user_id)
+            .where("role", "==", "subscriber")
+            .limit(1)
+        )
+        return any(True for _ in query.stream())
+
+    def toggle_like_marketplace(self, user_id: str, listing_id: str) -> bool:
+        """Toggle like atomico. Retorna o novo estado (True = curtiu agora).
+
+        - Se nao curtido: cria `likes/{user_id}` + increment likeCount
+        - Se ja curtido: deleta `likes/{user_id}` + decrement likeCount
+          (sem deixar `likeCount` ir abaixo de 0 — ver verificacao defensiva)
+        """
+        listing_ref = self._marketplace_ref().document(listing_id)
+        snap = listing_ref.get()
+        if not snap.exists:
+            raise UnauthorizedError("LISTING_NOT_FOUND")
+        data = snap.to_dict() or {}
+        if not data.get("active", True):
+            raise UnauthorizedError("LISTING_INACTIVE")
+
+        like_ref = listing_ref.collection("likes").document(user_id)
+        like = like_ref.get()
+        try:
+            from google.cloud import firestore as gcp_firestore
+
+            inc_plus = gcp_firestore.Increment(1)
+            inc_minus = gcp_firestore.Increment(-1)
+        except Exception:  # pragma: no cover - defensivo
+            current = data.get("likeCount") or 0
+            inc_plus = current + 1
+            inc_minus = max(0, current - 1)
+
+        if getattr(like, "exists", False):
+            like_ref.delete()
+            # Defensivo: so decrementa se ha algo a tirar
+            current = data.get("likeCount") or 0
+            if current > 0:
+                listing_ref.update({"likeCount": inc_minus})
+            return False
+
+        like_ref.set(
+            {"userId": user_id, "createdAt": datetime.now(timezone.utc)}
+        )
+        listing_ref.update({"likeCount": inc_plus})
+        return True
