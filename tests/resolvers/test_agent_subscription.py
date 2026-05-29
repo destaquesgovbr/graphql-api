@@ -426,3 +426,84 @@ async def test_subscribe_yields_tool_call_and_result_events(monkeypatch):
 
     sample_payload = events[3].data["generateRecortes"]
     assert json.loads(sample_payload["payloadJson"])["n"] == 42
+
+
+# ---------------------------------------------------------------------------
+# _resolve_worker_endpoint — normalizacao da env CLIPPING_WORKER_URL
+# ---------------------------------------------------------------------------
+class TestResolveWorkerEndpoint:
+    def test_appends_path_when_only_base_url(self):
+        from graphql_api.schema.resolvers.agent import _resolve_worker_endpoint
+
+        # Cloud Run prod (Terraform) injeta apenas a base do servico.
+        out = _resolve_worker_endpoint(
+            "https://destaquesgovbr-clipping-xxx.a.run.app"
+        )
+        assert out == (
+            "https://destaquesgovbr-clipping-xxx.a.run.app/agent/generate-recortes"
+        )
+
+    def test_strips_trailing_slash_before_appending(self):
+        from graphql_api.schema.resolvers.agent import _resolve_worker_endpoint
+
+        out = _resolve_worker_endpoint(
+            "https://destaquesgovbr-clipping-xxx.a.run.app/"
+        )
+        assert out == (
+            "https://destaquesgovbr-clipping-xxx.a.run.app/agent/generate-recortes"
+        )
+
+    def test_keeps_full_url_unchanged(self):
+        from graphql_api.schema.resolvers.agent import _resolve_worker_endpoint
+
+        # Testes legados e default local passam URL completa.
+        full = "http://localhost:8080/agent/generate-recortes"
+        assert _resolve_worker_endpoint(full) == full
+
+    def test_keeps_full_url_with_trailing_slash(self):
+        from graphql_api.schema.resolvers.agent import _resolve_worker_endpoint
+
+        out = _resolve_worker_endpoint(
+            "http://localhost:8080/agent/generate-recortes/"
+        )
+        # Trailing slash e normalizado fora.
+        assert out == "http://localhost:8080/agent/generate-recortes"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_subscribe_works_with_base_url_only(monkeypatch):
+    """Regressao: CLIPPING_WORKER_URL sem path (formato Cloud Run prod) deve
+    funcionar — o resolver appendar /agent/generate-recortes automaticamente.
+    Antes da fix, prod retornava 404 quando a flag graphql.agent fosse ON.
+    """
+    monkeypatch.setenv(
+        "CLIPPING_WORKER_URL", "https://worker-xxx.a.run.app"
+    )
+
+    # URL non-local: get_oidc_token tenta metadata server. Em teste mockamos
+    # 404 -> retorna None -> Authorization header nao e setado. Suficiente
+    # para validar a normalizacao do endpoint.
+    respx.get(
+        "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity"
+    ).mock(return_value=httpx.Response(404))
+
+    body = _make_sse_body([
+        {"type": "thinking", "message": "ok"},
+    ])
+    # respx precisa do path final
+    respx.post("https://worker-xxx.a.run.app/agent/generate-recortes").mock(
+        return_value=httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        ),
+    )
+
+    sub_result = await full_schema.subscribe(
+        'subscription { generateRecortes(prompt: "x") { __typename ... on AgentEventThinking { message } } }',
+        context_value=_auth_ctx(),
+    )
+    events = await _collect(sub_result)
+    assert len(events) == 1
+    assert events[0].data["generateRecortes"]["__typename"] == "AgentEventThinking"

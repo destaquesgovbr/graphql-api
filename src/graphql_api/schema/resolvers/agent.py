@@ -118,9 +118,28 @@ def _to_agent_event(evt: dict) -> AgentEvent | None:
     return None
 
 
+_ENDPOINT_PATH = "/agent/generate-recortes"
+
+
+def _resolve_worker_endpoint(raw: str) -> str:
+    """Normaliza `CLIPPING_WORKER_URL` para o endpoint completo.
+
+    Cloud Run (via Terraform) injeta apenas a base URL do servico
+    (`https://destaquesgovbr-clipping-*.run.app`); testes legados passam
+    a URL completa com `/agent/generate-recortes`. Aceitamos ambos:
+    se a URL ja termina com o path, mantemos; senao appendamos.
+    """
+    stripped = raw.rstrip("/")
+    if stripped.endswith(_ENDPOINT_PATH):
+        return stripped
+    return stripped + _ENDPOINT_PATH
+
+
 async def _stream_upstream(prompt: str) -> AsyncGenerator[AgentEvent, None]:
     """Conecta ao worker via SSE e emite `AgentEvent`s."""
-    worker_url = os.getenv("CLIPPING_WORKER_URL", _DEFAULT_WORKER_URL)
+    worker_url = _resolve_worker_endpoint(
+        os.getenv("CLIPPING_WORKER_URL", _DEFAULT_WORKER_URL)
+    )
     audience = _audience_from_worker_url(worker_url)
 
     headers = {"Accept": "text/event-stream"}
