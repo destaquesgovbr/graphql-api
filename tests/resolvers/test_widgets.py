@@ -146,6 +146,41 @@ class TestWidgetArticles:
         assert data["pagination"]["total"] == 15
         assert data["pagination"]["hasMore"] is True
 
+    def test_widget_articles_coerces_epoch_published_at(self):
+        """Regressão: `published_at`/`extracted_at` vêm como epoch int do
+        Typesense. Sem coerção para datetime, o Strawberry chamava `.isoformat()`
+        num int e quebrava (`'int' object has no attribute 'isoformat'`)."""
+        hit = {
+            "document": {
+                "unique_id": "art-epoch",
+                "title": "Com timestamp epoch",
+                "url": "https://example.com/art-epoch",
+                "agency": "gov",
+                "published_at": 1_717_400_000,  # epoch segundos
+                "extracted_at": 1_717_400_100,
+            }
+        }
+        mock_client = _mock_typesense_client_for_search([hit], found=1)
+        ctx = _make_context_with_typesense(mock_client)
+
+        result = test_schema.execute_sync(
+            """
+            query($config: WidgetConfigInput!, $page: Int!) {
+                widgetArticles(config: $config, page: $page) {
+                    articles { uniqueId publishedAt extractedAt }
+                }
+            }
+            """,
+            variable_values={"config": {"articlesPerPage": 5}, "page": 1},
+            context_value=ctx,
+        )
+
+        assert result.errors is None, f"Errors: {result.errors}"
+        article = result.data["widgetArticles"]["articles"][0]
+        # Serializado como ISO 8601 (não mais erro de isoformat).
+        assert article["publishedAt"].startswith("2024-")
+        assert article["extractedAt"].startswith("2024-")
+
     def test_widget_max_per_page_clamped_to_50(self):
         """When articlesPerPage exceeds 50, it must be clamped to 50."""
         mock_client = _mock_typesense_client_for_search([], found=0)

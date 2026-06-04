@@ -281,6 +281,31 @@ class TestClippingContextFields:
         assert result.errors is None, f"Errors: {result.errors}"
         assert result.data["clippings"][0]["isAuthor"] is True
 
+    def test_clipping_exposes_author_and_marketplace_fields(self, mock_firestore_ds):
+        """O portal precisa de `authorUserId`, `publishedToMarketplace` e
+        `marketplaceListingId` (badge + link de marketplace). Antes não existiam
+        no tipo `Clipping` → seleção inválida no portal."""
+        mock_firestore_ds.get_my_clippings.return_value = [
+            MyClippingResult(
+                clipping=_sample_clipping_data(
+                    id="clip-1",
+                    author_user_id="user-123",
+                    published_to_marketplace=True,
+                    marketplace_listing_id="listing-xyz",
+                ),
+                subscription=_sample_subscription(role="author"),
+            )
+        ]
+        result = test_schema.execute_sync(
+            "{ clippings { id authorUserId publishedToMarketplace marketplaceListingId } }",
+            context_value=self._ctx_with_loader(mock_firestore_ds),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        node = result.data["clippings"][0]
+        assert node["authorUserId"] == "user-123"
+        assert node["publishedToMarketplace"] is True
+        assert node["marketplaceListingId"] == "listing-xyz"
+
     def test_clipping_is_author_false_for_subscriber(self, mock_firestore_ds):
         mock_firestore_ds.get_my_clippings.return_value = [
             MyClippingResult(

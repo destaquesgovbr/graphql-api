@@ -57,14 +57,38 @@ async def get_oidc_token(audience: str, *, timeout: float = 5.0) -> str | None:
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get(_METADATA_URL, params=params, headers=headers)
-            if resp.status_code != 200:
-                logger.warning(
-                    "metadata server returned %s for audience %s",
-                    resp.status_code,
-                    audience,
-                )
-                return None
-            return resp.text.strip()
+            if resp.status_code == 200:
+                return resp.text.strip()
+            logger.warning(
+                "metadata server returned %s for audience %s; tentando ADC",
+                resp.status_code,
+                audience,
+            )
     except httpx.HTTPError as e:
-        logger.warning("failed to fetch OIDC token for %s: %s", audience, e)
+        logger.warning(
+            "metadata server indisponivel para %s (%s); tentando ADC", audience, e
+        )
+
+    # Fallback dev local: sem metadata server (fora do Cloud Run), tenta gerar
+    # um ID token via Application Default Credentials. Requer que a identidade
+    # do ADC tenha `roles/run.invoker` no servico alvo — senao o worker rejeita
+    # com 401 mesmo com token valido (limitacao documentada no plano R1, Fase 6).
+    return _fetch_id_token_via_adc(audience)
+
+
+def _fetch_id_token_via_adc(audience: str) -> str | None:
+    """Gera um ID token OIDC para `audience` via ADC (google-auth).
+
+    Sincrono (a lib google-auth nao e async); chamado so no fallback dev, onde
+    a latencia extra e irrelevante. Retorna None em qualquer falha.
+    """
+    try:
+        import google.auth.transport.requests
+        import google.oauth2.id_token
+
+        request = google.auth.transport.requests.Request()
+        token = google.oauth2.id_token.fetch_id_token(request, audience)
+        return token or None
+    except Exception as e:  # noqa: BLE001 — fallback best-effort
+        logger.warning("ADC id_token fallback falhou para %s: %s", audience, e)
         return None

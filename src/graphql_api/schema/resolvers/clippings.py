@@ -67,6 +67,9 @@ def _to_graphql_clipping(data: ClippingData) -> Clipping:
         active=data.active,
         created_at=data.created_at,
         updated_at=data.updated_at,
+        author_user_id=data.author_user_id,
+        published_to_marketplace=bool(data.published_to_marketplace),
+        marketplace_listing_id=data.marketplace_listing_id,
         _author_user_id=data.author_user_id,
     )
 

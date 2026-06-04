@@ -197,6 +197,13 @@ class Clipping:
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
+    # Identidade do autor + estado de marketplace (consumidos pelo portal para
+    # badges e links). `author_user_id` é exposto publicamente; `is_author`
+    # (abaixo) continua derivando do mesmo dado via `_author_user_id`.
+    author_user_id: Optional[str] = None
+    published_to_marketplace: bool = False
+    marketplace_listing_id: Optional[str] = None
+
     # Campo interno (não exposto): user_id do autor. Necessário para
     # `is_author` resolver. Strawberry só usa annotations decoradas;
     # `strawberry.field(init=True, ...)` mantém ele acessível ao código mas
