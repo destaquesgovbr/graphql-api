@@ -1,9 +1,10 @@
-.PHONY: help bootstrap-env dev test lint format
+.PHONY: help bootstrap-env dev test lint format docs-schema docs-serve docs-build
 
 VENV := .venv
 PY := $(VENV)/bin/python
 UVICORN := $(VENV)/bin/uvicorn
 PIP := $(VENV)/bin/pip
+MKDOCS := $(VENV)/bin/mkdocs
 
 help:  ## Lista targets disponiveis
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -29,3 +30,14 @@ lint: $(VENV)  ## Roda ruff check
 
 format: $(VENV)  ## Roda ruff format
 	$(VENV)/bin/ruff format src tests
+
+docs-schema: $(VENV)  ## Gera o SDL em docs/reference/ a partir do schema Strawberry
+	$(PY) scripts/export_schema.py
+
+docs-serve: docs-schema  ## Sobe o site de docs local (mkdocs serve, porta 8001)
+	@test -x $(MKDOCS) || $(PIP) install -e ".[docs]"
+	$(MKDOCS) serve -a localhost:8001
+
+docs-build: docs-schema  ## Gera o SDL e builda o site de docs (strict)
+	@test -x $(MKDOCS) || $(PIP) install -e ".[docs]"
+	$(MKDOCS) build --strict
