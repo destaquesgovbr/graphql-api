@@ -147,6 +147,28 @@ o portal** se as operations dele não forem atualizadas em conjunto. Rode
 `e2e/graphql` localmente antes de mergear mudanças de schema. O scalar de IDs
 neste serviço é `String` (não `ID`); resolvers de id usam `str`.
 
+## Documentação
+
+Site MkDocs profundo **co-localizado** neste repo (`docs/`, `mkdocs.yml`),
+versionado junto do código. Visão de alto nível e lugar na plataforma ficam na
+[documentação central do DGB](https://destaquesgovbr.github.io/docs/) (módulo
+GraphQL API), que linka para este site.
+
+```bash
+make docs-schema   # gera docs/reference/schema.{graphql,md} do schema Strawberry
+make docs-serve    # mkdocs serve em localhost:8001 (regenera o SDL antes)
+make docs-build    # mkdocs build --strict (regenera o SDL antes)
+```
+
+A **referência de schema** (`docs/reference/schema.md`) é **gerada** por
+`scripts/export_schema.py` (`print_schema(schema)`) — **não editar à mão**.
+Rode `make docs-schema` após qualquer mudança de schema; o CI (`.github/workflows/docs.yaml`)
+regenera e builda a cada push. O import do schema é barato (code-first, sem abrir
+datasources), então o export roda sem `.env.local`.
+
+As páginas narrativas (`docs/*.md`) são escritas à mão: arquitetura, datasources,
+auth, subscriptions/SSE, exemplos. Atualize-as quando o design mudar.
+
 ## Convenções
 
 - **Idioma:** comentários e mensagens de log em português; identificadores em inglês.
