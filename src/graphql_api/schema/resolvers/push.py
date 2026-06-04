@@ -108,7 +108,16 @@ class PushMutation:
             "enabled": preferences.enabled,
         }
 
-        ref = ds._db.collection("users").document(user_id)
-        ref.set({"push_preferences": doc_data}, merge=True)
+        # IMPORTANTE: gravar no MESMO local que `push_preferences` (query) lê —
+        # subcoleção `users/{uid}/pushPreferences/filters`. Antes gravava em
+        # `users/{uid}.push_preferences` (campo aninhado no doc), divergente da
+        # leitura, causando falha silenciosa (update OK mas read vazio).
+        doc_ref = (
+            ds._db.collection("users")
+            .document(user_id)
+            .collection("pushPreferences")
+            .document("filters")
+        )
+        doc_ref.set(doc_data, merge=True)
 
         return True

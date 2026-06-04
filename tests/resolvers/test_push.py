@@ -118,3 +118,33 @@ class TestUpdatePushPreferences:
         # Verify Firestore was called
         mock_db = mock_ds._db
         mock_db.collection.assert_called_with("users")
+
+    def test_update_writes_to_same_path_as_read(self):
+        """Regressão: o update gravava em `users/{uid}.push_preferences` (campo
+        aninhado), mas a query `pushPreferences` lê de
+        `users/{uid}/pushPreferences/filters` (subcoleção). O write tem que ir
+        para o MESMO local, senão `update` retorna True mas `read` vem vazio."""
+        mock_ds = _make_mock_firestore_ds()
+        ctx = _make_authenticated_context(mock_ds)
+
+        test_schema.execute_sync(
+            """
+            mutation($prefs: PushPreferencesInput!) {
+                updatePushPreferences(preferences: $prefs)
+            }
+            """,
+            variable_values={
+                "prefs": {"agencies": ["mec"], "themes": [], "enabled": True},
+            },
+            context_value=ctx,
+        )
+
+        # A cadeia deve ser users → document(uid) → collection("pushPreferences")
+        # → document("filters") → set(...). Confirma que a subcoleção foi usada.
+        user_doc = mock_ds._db.collection.return_value.document.return_value
+        user_doc.collection.assert_called_with("pushPreferences")
+        prefs_doc = user_doc.collection.return_value.document
+        prefs_doc.assert_called_with("filters")
+        prefs_doc.return_value.set.assert_called_once()
+        written = prefs_doc.return_value.set.call_args[0][0]
+        assert written["agencies"] == ["mec"]

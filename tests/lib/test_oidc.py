@@ -53,7 +53,12 @@ async def test_get_oidc_token_returns_none_for_127_0_0_1():
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_get_oidc_token_returns_none_on_metadata_failure():
+async def test_get_oidc_token_returns_none_on_metadata_failure(monkeypatch):
+    # Metadata falha (500) E ADC indisponivel → None. Mockamos o fallback ADC
+    # para None para isolar o comportamento (sem depender de ADC real da maquina).
+    monkeypatch.setattr(
+        "graphql_api.lib.oidc._fetch_id_token_via_adc", lambda audience: None
+    )
     audience = "https://remote.example.com"
     respx.get(_METADATA_URL).mock(return_value=httpx.Response(500))
 
@@ -63,9 +68,28 @@ async def test_get_oidc_token_returns_none_on_metadata_failure():
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_get_oidc_token_returns_none_on_connect_error():
+async def test_get_oidc_token_returns_none_on_connect_error(monkeypatch):
+    monkeypatch.setattr(
+        "graphql_api.lib.oidc._fetch_id_token_via_adc", lambda audience: None
+    )
     audience = "https://remote.example.com"
     respx.get(_METADATA_URL).mock(side_effect=httpx.ConnectError("no metadata server"))
 
     token = await get_oidc_token(audience)
     assert token is None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_oidc_token_falls_back_to_adc_when_metadata_unavailable(
+    monkeypatch,
+):
+    # Fora do Cloud Run (sem metadata server), gera token via ADC.
+    monkeypatch.setattr(
+        "graphql_api.lib.oidc._fetch_id_token_via_adc",
+        lambda audience: "adc-token-xyz",
+    )
+    respx.get(_METADATA_URL).mock(side_effect=httpx.ConnectError("no metadata"))
+
+    token = await get_oidc_token("https://clipping-worker-xyz.a.run.app")
+    assert token == "adc-token-xyz"

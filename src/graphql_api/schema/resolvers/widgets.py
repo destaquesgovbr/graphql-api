@@ -1,4 +1,5 @@
 import math
+from datetime import datetime, timezone
 
 import strawberry
 from strawberry.types import Info
@@ -13,6 +14,23 @@ from graphql_api.schema.types.widget import (
 
 MAX_PER_PAGE = 50
 COLLECTION_NAME = "news"
+
+
+def _coerce_datetime(value: object) -> "datetime | None":
+    """Normaliza timestamps do Typesense para `datetime`.
+
+    O índice guarda `published_at`/`extracted_at` como epoch (int/float em
+    segundos). O tipo GraphQL `Article` espera `datetime`; sem esta conversão
+    o Strawberry chama `.isoformat()` num int e quebra a serialização
+    (`'int' object has no attribute 'isoformat'`).
+    """
+    if value is None or isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    if isinstance(value, str) and value.isdigit():
+        return datetime.fromtimestamp(int(value), tz=timezone.utc)
+    return None
 
 
 def _hit_to_article(hit: dict) -> Article:
@@ -31,8 +49,8 @@ def _hit_to_article(hit: dict) -> Article:
         tags=doc.get("tags", []),
         agency=doc.get("agency"),
         agency_name=doc.get("agency_name"),
-        published_at=doc.get("published_at"),
-        extracted_at=doc.get("extracted_at"),
+        published_at=_coerce_datetime(doc.get("published_at")),
+        extracted_at=_coerce_datetime(doc.get("extracted_at")),
     )
 
 

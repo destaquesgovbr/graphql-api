@@ -103,6 +103,15 @@ class ClippingData(BaseModel):
     delivery_channels: Optional[dict] = Field(default=None, alias="deliveryChannels")
     active: bool = True
     author_user_id: Optional[str] = Field(default=None, alias="authorUserId")
+    # Estado de marketplace: setado por `publish_to_marketplace` (True +
+    # listing id) e limpo por `unpublish_from_marketplace`. O portal usa esses
+    # campos para o badge "Publicado" e o link para o listing.
+    published_to_marketplace: bool = Field(
+        default=False, alias="publishedToMarketplace"
+    )
+    marketplace_listing_id: Optional[str] = Field(
+        default=None, alias="marketplaceListingId"
+    )
     created_at: Optional[datetime] = Field(default=None, alias="createdAt")
     updated_at: Optional[datetime] = Field(default=None, alias="updatedAt")
 
