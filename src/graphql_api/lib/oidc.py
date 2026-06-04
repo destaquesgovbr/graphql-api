@@ -43,10 +43,12 @@ async def get_oidc_token(audience: str, *, timeout: float = 5.0) -> str | None:
         timeout: timeout em segundos para a chamada ao metadata server.
 
     Returns:
-        Token plain text (str) quando o metadata server responde 200.
+        Token plain text (str) quando o metadata server responde 200 OU, em
+        fallback (sem metadata server, ex: dev local), quando o ADC consegue
+        gerar um ID token para o `audience`.
         `None` quando:
             - `audience` aponta para localhost/127.0.0.1 (dev local).
-            - metadata server retorna erro ou conexao falha.
+            - metadata server falha E o fallback ADC tambem nao gera token.
     """
     if _is_local_audience(audience):
         return None
