@@ -259,6 +259,31 @@ class FirestoreDatasource:
     def _subscriptions_ref(self):
         return self._db.collection("subscriptions")
 
+    def _users_ref(self):
+        return self._db.collection("users")
+
+    def resolve_stable_user_id(self, email: str) -> Optional[str]:
+        """Resolve o id estável do usuário a partir do email — espelha o
+        `resolveStableUser` do portal (`portal/src/lib/resolve-stable-user-id.ts`).
+
+        O portal usa como id do usuário o id do doc em `users` cujo campo
+        `email` casa (âncora estável por email, imune a trocas do `sub` do
+        Keycloak quando o usuário é recriado). Os dados (`clippings.authorUserId`,
+        `subscriptions.userId`) são gravados com esse id. Para o graphql-api
+        identificar o mesmo usuário, resolvemos o id da mesma forma em vez de
+        usar o `sub` cru do JWT.
+
+        Retorna o id do doc, ou `None` se não houver doc para o email (nesse
+        caso o chamador mantém o `sub` como fallback).
+        """
+        normalized = email.lower().strip()
+        if not normalized:
+            return None
+        query = self._users_ref().where("email", "==", normalized).limit(1)
+        for d in query.stream():
+            return d.id
+        return None
+
     # -- parsing helpers ----------------------------------------------------
     @staticmethod
     def _doc_to_clipping(doc_id: str, data: dict) -> ClippingData:

@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -14,6 +15,30 @@ if TYPE_CHECKING:
     from graphql_api.datasources.typesense_admin import TypesenseAdminDatasource
 
 logger = logging.getLogger(__name__)
+
+# Cache (email normalizado → stableUserId) com TTL, para evitar um read no
+# Firestore a cada request autenticado. O stableUserId do portal é estável,
+# então um TTL curto é seguro.
+_STABLE_ID_TTL = 600.0
+_stable_id_cache: dict[str, tuple[str, float]] = {}
+
+
+def _resolve_stable_user_id(firestore_ds: Any, email: str) -> Optional[str]:
+    """Resolve (com cache) o stableUserId por email via FirestoreDatasource.
+    Espelha o `resolveStableUser` do portal para alinhar a identidade. Retorna
+    `None` se não houver doc — o chamador mantém o `sub` do JWT como fallback.
+    """
+    key = email.lower().strip()
+    if not key:
+        return None
+    now = time.monotonic()
+    cached = _stable_id_cache.get(key)
+    if cached is not None and cached[1] > now:
+        return cached[0]
+    stable = firestore_ds.resolve_stable_user_id(key)
+    if stable:
+        _stable_id_cache[key] = (stable, now + _STABLE_ID_TTL)
+    return stable
 
 
 @dataclass
@@ -118,6 +143,21 @@ async def get_context(request: Optional["Request"] = None) -> GraphQLContext:
             issuer = os.environ.get("AUTH_ISSUER")
             user = await verify_jwt(token, jwks_url, issuer=issuer)
             if user is not None:
+                # Alinha a identidade ao portal: o `authorUserId`/`userId` dos
+                # dados é o stableUserId (id do doc `users` por email), não o
+                # `sub` cru do JWT. Resolve por email; mantém o `sub` se não
+                # houver doc ou se o Firestore falhar.
+                if ctx.firestore_ds is not None and user.email:
+                    try:
+                        stable = _resolve_stable_user_id(
+                            ctx.firestore_ds, user.email
+                        )
+                        if stable:
+                            user.id = stable
+                    except Exception as exc:
+                        logger.warning(
+                            "falha ao resolver stableUserId por email: %s", exc
+                        )
                 ctx.user = user
                 return ctx
         except Exception as exc:  # pragma: no cover - defensivo

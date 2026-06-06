@@ -920,3 +920,32 @@ class TestReleasesDatasource:
         assert len(result["clip-1"]) == 1
         assert len(result["clip-2"]) == 1
         assert result["clip-3"] == []
+
+
+class TestResolveStableUserId:
+    """resolve_stable_user_id — espelha o resolveStableUser do portal:
+    id do doc `users` cujo `email` (normalizado) casa; senão None."""
+
+    @staticmethod
+    def _ds_with_users(users: dict[str, dict]):
+        db = FakeFirestore()
+        db.store["users"] = dict(users)
+        return FirestoreDatasource(db)
+
+    def test_returns_doc_id_when_email_matches(self):
+        ds = self._ds_with_users(
+            {"stable-123": {"email": "user@example.com", "role": "user"}}
+        )
+        assert ds.resolve_stable_user_id("user@example.com") == "stable-123"
+
+    def test_normalizes_email_before_lookup(self):
+        ds = self._ds_with_users({"stable-123": {"email": "user@example.com"}})
+        assert ds.resolve_stable_user_id("  USER@Example.COM  ") == "stable-123"
+
+    def test_returns_none_when_no_user_doc(self):
+        ds = self._ds_with_users({"stable-123": {"email": "other@example.com"}})
+        assert ds.resolve_stable_user_id("missing@example.com") is None
+
+    def test_returns_none_for_empty_email(self):
+        ds = self._ds_with_users({"stable-123": {"email": "user@example.com"}})
+        assert ds.resolve_stable_user_id("   ") is None
