@@ -36,6 +36,7 @@ class MarketplaceListing:
     description: Optional[str] = None
     recortes: list[MarketplaceRecorte] = strawberry.field(default_factory=list)
     prompt: Optional[str] = None
+    schedule: Optional[str] = None
     like_count: int = 0
     follower_count: int = 0
     clone_count: int = 0

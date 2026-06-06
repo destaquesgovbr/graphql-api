@@ -321,6 +321,37 @@ class TestUnpublishFromMarketplace:
         assert ok is False
         db.batch.assert_not_called()
 
+    def test_succeeds_when_source_clipping_missing(self):
+        # Regressao: clipping fonte excluido apos a publicacao. O batch.update
+        # num doc inexistente falhava o batch INTEIRO ("No document to update")
+        # e quebrava o unpublish. Agora o reset do clipping e pulado e o
+        # soft-delete do listing commita normalmente.
+        db = MagicMock()
+        ds = FirestoreDatasource(db=db)
+        clip_col = MagicMock(name="clip_col")
+        mp_col = MagicMock(name="mp_col")
+        db.collection.side_effect = lambda name: {
+            "clippings": clip_col,
+            "marketplace": mp_col,
+        }[name]
+        listing_ref = mp_col.document.return_value
+        listing_ref.get.return_value = _mock_doc(
+            "L1", _listing_doc(sourceClippingId="clip-deleted")
+        )
+        clip_ref = clip_col.document.return_value
+        clip_ref.get.return_value = _mock_doc("clip-deleted", {}, exists=False)
+        batch = db.batch.return_value
+
+        ok = ds.unpublish_from_marketplace("L1")
+        assert ok is True
+
+        # So o listing e desativado; o clipping inexistente NAO entra no batch.
+        update_calls = batch.update.call_args_list
+        assert len(update_calls) == 1
+        assert update_calls[0].args[0] is listing_ref
+        assert update_calls[0].args[1] == {"active": False}
+        batch.commit.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # clone_marketplace_listing

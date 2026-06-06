@@ -56,6 +56,7 @@ def _doc_to_listing(
         description=listing_data.description,
         recortes=recortes,
         prompt=listing_data.prompt,
+        schedule=listing_data.schedule,
         like_count=listing_data.like_count,
         follower_count=listing_data.follower_count,
         clone_count=listing_data.clone_count,

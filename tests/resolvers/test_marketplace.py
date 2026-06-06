@@ -5,7 +5,7 @@ import strawberry
 
 from graphql_api.context import GraphQLContext, User
 from graphql_api.schema.resolvers.health import HealthQuery
-from graphql_api.schema.resolvers.marketplace import MarketplaceQuery
+from graphql_api.schema.resolvers.marketplace import MarketplaceQuery, _doc_to_listing
 
 
 @strawberry.type
@@ -171,3 +171,17 @@ class TestMarketplaceListings:
         assert data["hasFollowed"] is None
         ds.has_liked_listing.assert_not_called()
         ds.has_followed_listing.assert_not_called()
+
+
+class TestListingScheduleExposure:
+    def test_doc_to_listing_exposes_schedule(self):
+        # R1-05: o `schedule` é gravado no listing pelo publish, mas não era
+        # exposto no tipo GraphQL — sumia no path GraphQL com a flag ON.
+        listing = _doc_to_listing(
+            {**SAMPLE_LISTING, "schedule": "0 8 * * *"}
+        )
+        assert listing.schedule == "0 8 * * *"
+
+    def test_doc_to_listing_schedule_defaults_none(self):
+        listing = _doc_to_listing({**SAMPLE_LISTING})
+        assert listing.schedule is None

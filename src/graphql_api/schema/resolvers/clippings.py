@@ -265,6 +265,17 @@ class ClippingMutation:
         return _to_graphql_clipping(result)
 
     @strawberry.mutation(
+        description="Liga/desliga um clipping (campo `active`; somente o autor)",
+        permission_classes=[IsAuthenticated],
+    )
+    def set_clipping_active(self, info: Info, id: str, active: bool) -> Clipping:
+        ctx = info.context
+        ds = ctx.firestore_ds
+        user_id = ctx.user.id
+        result = ds.set_clipping_active(user_id, id, active)
+        return _to_graphql_clipping(result)
+
+    @strawberry.mutation(
         description="Deleta um clipping",
         permission_classes=[IsAuthenticated],
     )

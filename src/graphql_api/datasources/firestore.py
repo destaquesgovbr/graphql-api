@@ -199,6 +199,7 @@ class MarketplaceListingData(BaseModel):
     description: Optional[str] = None
     recortes: list[dict] = Field(default_factory=list)
     prompt: Optional[str] = None
+    schedule: Optional[str] = None
     like_count: int = Field(default=0, alias="likeCount")
     follower_count: int = Field(default=0, alias="followerCount")
     clone_count: int = Field(default=0, alias="cloneCount")
@@ -487,6 +488,33 @@ class FirestoreDatasource:
 
         clipping_ref.update(update_dict)
 
+        doc = clipping_ref.get()
+        return self._doc_to_clipping(doc.id, doc.to_dict())
+
+    def set_clipping_active(
+        self, user_id: str, clipping_id: str, active: bool
+    ) -> ClippingData:
+        """Liga/desliga um clipping (campo `active`). Só o autor pode.
+
+        Toggle dedicado — `ClippingInput` (update_clipping) não carrega
+        `active`, então o portal recorria a um PATCH REST direto. Esta operação
+        fecha esse caminho na fachada GraphQL.
+        """
+        clipping_ref = self._clippings_ref().document(clipping_id)
+        doc = clipping_ref.get()
+        if not doc.exists:
+            raise UnauthorizedError(f"clipping {clipping_id} not found")
+        current = doc.to_dict() or {}
+        if (
+            current.get("authorUserId") != user_id
+            and current.get("author_user_id") != user_id
+        ):
+            raise UnauthorizedError(
+                f"user {user_id} is not the author of clipping {clipping_id}"
+            )
+        clipping_ref.update(
+            {"active": active, "updatedAt": datetime.now(tz=timezone.utc)}
+        )
         doc = clipping_ref.get()
         return self._doc_to_clipping(doc.id, doc.to_dict())
 
@@ -802,13 +830,20 @@ class FirestoreDatasource:
         batch = self._db.batch()
         batch.update(listing_ref, {"active": False})
         if source_clipping_id:
-            batch.update(
-                self._clippings_ref().document(source_clipping_id),
-                {
-                    "publishedToMarketplace": False,
-                    "marketplaceListingId": None,
-                },
-            )
+            clipping_ref = self._clippings_ref().document(source_clipping_id)
+            # O clipping fonte pode ter sido excluido apos a publicacao; nesse
+            # caso nao ha flags a resetar. Sem este guard, o batch.update num
+            # doc inexistente falha o batch INTEIRO com "No document to update"
+            # (Firestore exige doc existente para update), quebrando o unpublish
+            # — inclusive o soft-delete do listing, que e a operacao principal.
+            if clipping_ref.get().exists:
+                batch.update(
+                    clipping_ref,
+                    {
+                        "publishedToMarketplace": False,
+                        "marketplaceListingId": None,
+                    },
+                )
         batch.commit()
         return True
 
