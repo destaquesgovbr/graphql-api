@@ -704,6 +704,33 @@ class TestUpdateClipping:
             ds.update_clipping("user-2", "clip-1", {"name": "Hacker"})
 
 
+class TestSetClippingActive:
+    def test_toggles_active_for_author(self):
+        db = FakeFirestore()
+        db.store["clippings"]["clip-1"] = _clipping_doc(
+            authorUserId="user-1", active=True
+        )
+        ds = FirestoreDatasource(db)
+
+        result = ds.set_clipping_active("user-1", "clip-1", False)
+
+        assert isinstance(result, ClippingData)
+        assert db.store["clippings"]["clip-1"]["active"] is False
+
+    def test_non_author_raises_unauthorized(self):
+        db = FakeFirestore()
+        db.store["clippings"]["clip-1"] = _clipping_doc(authorUserId="user-1")
+        ds = FirestoreDatasource(db)
+        with pytest.raises(UnauthorizedError):
+            ds.set_clipping_active("user-2", "clip-1", False)
+
+    def test_missing_clipping_raises_unauthorized(self):
+        db = FakeFirestore()
+        ds = FirestoreDatasource(db)
+        with pytest.raises(UnauthorizedError):
+            ds.set_clipping_active("user-1", "missing", False)
+
+
 # ---------------------------------------------------------------------------
 # 9. update_my_subscription
 # ---------------------------------------------------------------------------

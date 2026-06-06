@@ -245,6 +245,7 @@ type MarketplaceListing {
   description: String
   recortes: [MarketplaceRecorte!]!
   prompt: String
+  schedule: String
   likeCount: Int!
   followerCount: Int!
   cloneCount: Int!
@@ -274,6 +275,9 @@ type Mutation {
 
   """Atualiza um clipping existente"""
   updateClipping(id: String!, input: ClippingInput!): Clipping!
+
+  """Liga/desliga um clipping (campo `active`; somente o autor)"""
+  setClippingActive(id: String!, active: Boolean!): Clipping!
 
   """Deleta um clipping"""
   deleteClipping(id: String!): Boolean!
