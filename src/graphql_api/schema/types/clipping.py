@@ -15,6 +15,7 @@ em `datasources.firestore`). O campo `role` é mapeado para o enum Strawberry
 conversão acontece no construtor).
 """
 
+import json
 from datetime import datetime
 from enum import Enum
 from typing import Optional
@@ -132,8 +133,8 @@ class Release:
 
     Gerado a partir do `ReleaseData` Pydantic. Campos sao expostos em
     camelCase pelo Strawberry (conversao automatica de snake_case).
-    `digest` (texto raw) e mantido fora do schema por enquanto — apenas
-    `digestHtml` (renderizado) e exposto.
+    `digest` (texto raw) e mantido fora do schema — apenas `digestHtml`
+    (renderizado) e `digestPreview` (resumo curto computado) sao expostos.
     """
 
     id: strawberry.auto
@@ -145,6 +146,27 @@ class Release:
     release_url: strawberry.auto
     ref_time: strawberry.auto
     since_hours: strawberry.auto
+    # Resumo curto (<=150 chars) derivado do `digest` raw. Campo explicito
+    # (nao `strawberry.auto`): o `digest` raw nao e exposto no schema; so este
+    # preview computado. Exposto como `digestPreview` (camelCase).
+    digest_preview: Optional[str] = None
+
+
+def _digest_preview(digest: str) -> str:
+    """Deriva o resumo curto (<=150 chars) do `digest` raw.
+
+    Replica EXATAMENTE a logica do portal SSR (`lib/release-utils.ts`):
+    tenta `JSON.parse(digest).intro`; em qualquer falha, cai para o digest
+    raw fatiado. Vazio -> "".
+    """
+    if not digest:
+        return ""
+    try:
+        parsed = json.loads(digest) or {}
+        intro = parsed.get("intro") or ""
+        return intro[:150]
+    except Exception:
+        return digest[:150]
 
 
 def release_from_data(data: ReleaseData) -> Release:
@@ -159,6 +181,7 @@ def release_from_data(data: ReleaseData) -> Release:
         release_url=data.release_url,
         ref_time=data.ref_time,
         since_hours=data.since_hours,
+        digest_preview=_digest_preview(data.digest),
     )
 
 

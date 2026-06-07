@@ -208,6 +208,19 @@ class MarketplaceListingData(BaseModel):
     active: bool = True
 
 
+@dataclass(frozen=True)
+class FollowedListingResult:
+    """Tupla retornada por `get_followed_listings`: listing + subscription.
+
+    O listing e o `MarketplaceListingData` resolvido do marketplace (ativo); a
+    subscription carrega os canais de entrega *deste usuário* (`role=subscriber`)
+    — expostos no tipo GraphQL `FollowedListing`.
+    """
+
+    listing: "MarketplaceListingData"
+    subscription: "SubscriptionData"
+
+
 class UnauthorizedError(Exception):
     """Operação negada: o usuário não tem o role necessário."""
 
@@ -1017,3 +1030,93 @@ class FirestoreDatasource:
         )
         listing_ref.update({"likeCount": inc_plus})
         return True
+
+    # -- read: telegram link ------------------------------------------------
+    def has_telegram_linked(self, user_id: str) -> bool:
+        """True se existe `users/{user_id}/telegramLink/account`.
+
+        Espelha o `getHasTelegram` do portal: a vinculacao do Telegram grava o
+        chatId em `users/{userId}/telegramLink/account` (ver fluxo em
+        `portal/src/app/api/auth/telegram/callback`). Aqui so checamos
+        existencia do doc.
+        """
+        doc = (
+            self._users_ref()
+            .document(user_id)
+            .collection("telegramLink")
+            .document("account")
+            .get()
+        )
+        return bool(getattr(doc, "exists", False))
+
+    # -- read: followed listings --------------------------------------------
+    def get_followed_listings(self, user_id: str) -> list[FollowedListingResult]:
+        """Retorna os listings ativos que o usuario segue, com a sub de cada um.
+
+        Substitui o `getFollows` do portal. Logica (D3-style, subscriptions-first):
+          1) query: `subscriptions where userId == X AND role == "subscriber"
+             AND active == True`
+          2) para cada sub, resolve o listing ativo cujo `sourceClippingId`
+             casa o `clippingId` da sub (`marketplace where sourceClippingId == Y
+             AND active == True`).
+
+        Subs cujo listing esta inativo ou ausente sao silenciosamente excluidas.
+        """
+        subs_query = (
+            self._subscriptions_ref()
+            .where("userId", "==", user_id)
+            .where("role", "==", "subscriber")
+            .where("active", "==", True)
+        )
+        subs = [
+            self._doc_to_subscription(d.id, d.to_dict()) for d in subs_query.stream()
+        ]
+        if not subs:
+            return []
+
+        results: list[FollowedListingResult] = []
+        for sub in subs:
+            listing_query = (
+                self._marketplace_ref()
+                .where("sourceClippingId", "==", sub.clipping_id)
+                .where("active", "==", True)
+            )
+            listing_doc = next(iter(listing_query.stream()), None)
+            if listing_doc is None:
+                # Listing inativo ou inexistente -> follow excluido.
+                continue
+            listing_data = MarketplaceListingData.model_validate(
+                self._listing_doc_to_dict(listing_doc.id, listing_doc.to_dict())
+            )
+            results.append(
+                FollowedListingResult(listing=listing_data, subscription=sub)
+            )
+        return results
+
+    def get_marketplace_listing_for_clipping(
+        self, clipping_id: str
+    ) -> Optional[dict]:
+        """Retorna o listing ATIVO cujo `sourceClippingId == clipping_id`, ou None.
+
+        Usado pela autorizacao de `release(id)`: se o clipping fonte tem um
+        listing ativo, o release e publico. Espelha a regra de
+        `MarketplaceListing.releases` (so listing ativo expoe releases).
+
+        Retorna None se nao houver listing ativo para o clipping.
+        """
+        query = (
+            self._marketplace_ref()
+            .where("sourceClippingId", "==", clipping_id)
+            .where("active", "==", True)
+        )
+        doc = next(iter(query.stream()), None)
+        if doc is None:
+            return None
+        return self._listing_doc_to_dict(doc.id, doc.to_dict())
+
+    def get_release(self, release_id: str) -> Optional[ReleaseData]:
+        """Busca um release por id (top-level `releases/{id}`), ou None."""
+        doc = self._releases_ref().document(release_id).get()
+        if not getattr(doc, "exists", False):
+            return None
+        return self._doc_to_release(doc.id, doc.to_dict())

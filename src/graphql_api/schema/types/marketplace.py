@@ -17,7 +17,11 @@ from typing import Optional
 import strawberry
 from strawberry.types import Info
 
-from graphql_api.schema.types.clipping import Release, release_from_data
+from graphql_api.schema.types.clipping import (
+    DeliveryChannels,
+    Release,
+    release_from_data,
+)
 
 
 @strawberry.type
@@ -83,6 +87,45 @@ class MarketplaceListing:
             self.source_clipping_id, limit=safe_limit, before=before
         )
         return [release_from_data(d) for d in data_list]
+
+
+@strawberry.type
+class FollowedListing:
+    """Listing seguido pelo usuario, com os campos da subscription dele.
+
+    Substitui o `getFollows` do portal. Carrega todos os campos escalares de
+    `MarketplaceListing` (o listing publico ativo) MAIS os campos
+    per-subscription do seguidor: `deliveryChannels`, `extraEmails`,
+    `webhookUrl`, `followedAt`.
+
+    Decisao de composicao: tipo proprio (nao subclasse de `MarketplaceListing`)
+    porque o contexto e "minhas inscricoes" — nao precisa do subfield `releases`
+    nem dos contextuais `hasLiked`/`hasFollowed` (o usuario ja segue por
+    definicao). Reusa `DeliveryChannels` e `MarketplaceRecorte`. O builder
+    `followed_listing_from_data` faz o mapeamento a partir do
+    `FollowedListingResult` (listing + subscription) do datasource.
+    """
+
+    id: str
+    author_user_id: str
+    author_display_name: str
+    source_clipping_id: str
+    name: str
+    description: Optional[str] = None
+    recortes: list[MarketplaceRecorte] = strawberry.field(default_factory=list)
+    prompt: Optional[str] = None
+    schedule: Optional[str] = None
+    like_count: int = 0
+    follower_count: int = 0
+    clone_count: int = 0
+    published_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    active: bool = True
+    # Campos juntados da subscription do seguidor.
+    delivery_channels: Optional[DeliveryChannels] = None
+    extra_emails: list[str] = strawberry.field(default_factory=list)
+    webhook_url: Optional[str] = None
+    followed_at: Optional[datetime] = None
 
 
 @strawberry.type

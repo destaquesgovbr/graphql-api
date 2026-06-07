@@ -4,10 +4,15 @@ import strawberry
 from strawberry.types import Info
 
 from graphql_api.auth.guards import IsAuthenticated
-from graphql_api.datasources.firestore import ClippingData, MarketplaceListingData
+from graphql_api.datasources.firestore import (
+    ClippingData,
+    FollowedListingResult,
+    MarketplaceListingData,
+)
 from graphql_api.schema.resolvers.clippings import _to_graphql_clipping
-from graphql_api.schema.types.clipping import Clipping
+from graphql_api.schema.types.clipping import Clipping, DeliveryChannels
 from graphql_api.schema.types.marketplace import (
+    FollowedListing,
     MarketplaceListing,
     MarketplaceListingsResult,
     MarketplaceRecorte,
@@ -68,6 +73,57 @@ def _doc_to_listing(
     )
 
 
+def _followed_listing_from_result(result: FollowedListingResult) -> FollowedListing:
+    """Constroi `FollowedListing` a partir do `FollowedListingResult` do datasource.
+
+    Junta os campos do listing (publico, ativo) com os campos da subscription do
+    seguidor (`deliveryChannels`, `extraEmails`, `webhookUrl`, `followedAt`).
+    """
+    listing = result.listing
+    sub = result.subscription
+
+    recortes = [
+        MarketplaceRecorte(
+            id=r.get("id", ""),
+            title=r.get("title", ""),
+            themes=r.get("themes", []),
+            agencies=r.get("agencies", []),
+            keywords=r.get("keywords", []),
+        )
+        for r in listing.recortes
+    ]
+
+    channels = sub.delivery_channels or {}
+    dc = DeliveryChannels(
+        email=bool(channels.get("email", False)),
+        telegram=bool(channels.get("telegram", False)),
+        push=bool(channels.get("push", False)),
+        webhook=bool(channels.get("webhook", False)),
+    )
+
+    return FollowedListing(
+        id=listing.id,
+        author_user_id=listing.author_user_id,
+        author_display_name=listing.author_display_name,
+        source_clipping_id=listing.source_clipping_id,
+        name=listing.name,
+        description=listing.description,
+        recortes=recortes,
+        prompt=listing.prompt,
+        schedule=listing.schedule,
+        like_count=listing.like_count,
+        follower_count=listing.follower_count,
+        clone_count=listing.clone_count,
+        published_at=listing.published_at,
+        updated_at=listing.updated_at,
+        active=listing.active,
+        delivery_channels=dc,
+        extra_emails=list(sub.extra_emails or []),
+        webhook_url=sub.webhook_url if sub.webhook_url else None,
+        followed_at=sub.subscribed_at,
+    )
+
+
 @strawberry.type
 class MarketplaceQuery:
     @strawberry.field(description="Lista listings do marketplace com paginacao")
@@ -100,6 +156,22 @@ class MarketplaceQuery:
         if data is None:
             return None
         return _doc_to_listing(data, user_id=user_id, ds=ds)
+
+    @strawberry.field(
+        description=(
+            "Listings que o usuario autenticado segue, com os campos da "
+            "subscription dele (canais, emails extras, webhook, data). "
+            "Substitui o `getFollows` do portal. Exclui follows cujo listing "
+            "esta inativo ou ausente."
+        ),
+        permission_classes=[IsAuthenticated],
+    )
+    def my_followed_listings(self, info: Info) -> list[FollowedListing]:
+        ctx = info.context
+        ds = ctx.firestore_ds
+        user_id = ctx.user.id
+        results = ds.get_followed_listings(user_id)
+        return [_followed_listing_from_result(r) for r in results]
 
 
 @strawberry.type
