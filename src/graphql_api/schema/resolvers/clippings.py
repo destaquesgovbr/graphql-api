@@ -14,8 +14,10 @@ from graphql_api.schema.types.clipping import (
     DeliveryChannelsInput,
     EstimateResult,
     Recorte,
+    Release,
     SubscribeInput,
     UserSubscription,
+    release_from_data,
     user_subscription_from_data,
 )
 
@@ -202,6 +204,48 @@ class ClippingQuery:
         if data is None:
             return None
         return _to_graphql_clipping(data)
+
+    @strawberry.field(
+        description=(
+            "Busca um release por ID. Autorizacao espelha "
+            "`MarketplaceListing.releases`: PUBLICO se o listing fonte do "
+            "clipping esta ativo; caso contrario somente autor ou subscriber. "
+            "Substitui o `getReleaseById` do portal. Retorna None se o release "
+            "nao existe OU o caller nao esta autorizado."
+        ),
+    )
+    def release(self, info: Info, id: str) -> Optional["Release"]:
+        ctx = info.context
+        ds = ctx.firestore_ds
+
+        release_data = ds.get_release(id)
+        if release_data is None:
+            return None
+
+        # Autorizacao espelhando MarketplaceListing.releases: PUBLICO se o
+        # listing fonte do clipping esta ativo.
+        listing = ds.get_marketplace_listing_for_clipping(release_data.clipping_id)
+        if listing is not None:
+            # Listing ativo -> release publica.
+            return release_from_data(release_data)
+
+        # Sem listing ativo: so autor ou subscriber. Exige sessao.
+        user = getattr(ctx, "user", None)
+        if user is None:
+            return None
+
+        clipping = ds.get_clipping(release_data.clipping_id)
+        is_author = (
+            clipping is not None
+            and clipping.author_user_id is not None
+            and clipping.author_user_id == user.id
+        )
+        if not is_author:
+            sub = ds.get_subscription(user.id, release_data.clipping_id)
+            if sub is None:
+                return None
+
+        return release_from_data(release_data)
 
     @strawberry.field(
         description="Estima o numero de artigos para um clipping",

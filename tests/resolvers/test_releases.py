@@ -9,6 +9,7 @@ Os testes usam o mesmo padrao dos demais resolvers: `strawberry.Schema`
 sintetico com `ClippingQuery` + mock do `FirestoreDatasource`.
 """
 
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -179,12 +180,65 @@ class TestReleaseSchema:
             "clippingId",
             "clippingName",
             "digestHtml",
+            "digestPreview",
             "articlesCount",
             "createdAt",
             "releaseUrl",
             "refTime",
             "sinceHours",
         }.issubset(field_names)
+
+    def test_digest_preview_from_json_intro(self):
+        # digest JSON com `intro` -> preview = intro[:150]
+        from graphql_api.schema.types.clipping import release_from_data
+
+        intro = "Brasil avança em " + ("x" * 200)
+        data = ReleaseData.model_validate(
+            {
+                "id": "rel-1",
+                "clippingId": "c1",
+                "digest": json.dumps({"intro": intro, "outro": "ignored"}),
+            }
+        )
+        release = release_from_data(data)
+        assert release.digest_preview == intro[:150]
+        assert len(release.digest_preview) == 150
+
+    def test_digest_preview_from_non_json_falls_back_to_raw(self):
+        # digest nao-JSON -> digest[:150]
+        from graphql_api.schema.types.clipping import release_from_data
+
+        raw = "texto puro sem json " + ("y" * 200)
+        data = ReleaseData.model_validate(
+            {"id": "rel-2", "clippingId": "c1", "digest": raw}
+        )
+        release = release_from_data(data)
+        assert release.digest_preview == raw[:150]
+        assert len(release.digest_preview) == 150
+
+    def test_digest_preview_empty_when_no_digest(self):
+        # digest vazio -> ""
+        from graphql_api.schema.types.clipping import release_from_data
+
+        data = ReleaseData.model_validate(
+            {"id": "rel-3", "clippingId": "c1", "digest": ""}
+        )
+        release = release_from_data(data)
+        assert release.digest_preview == ""
+
+    def test_digest_preview_json_without_intro_returns_empty(self):
+        # JSON valido sem `intro` -> "" (intro ausente vira "")
+        from graphql_api.schema.types.clipping import release_from_data
+
+        data = ReleaseData.model_validate(
+            {
+                "id": "rel-4",
+                "clippingId": "c1",
+                "digest": json.dumps({"outro": "sem intro"}),
+            }
+        )
+        release = release_from_data(data)
+        assert release.digest_preview == ""
 
     def test_clipping_has_releases_subfield_with_args(self):
         introspection = test_schema.execute_sync(

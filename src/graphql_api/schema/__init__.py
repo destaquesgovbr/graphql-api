@@ -11,6 +11,7 @@ from graphql_api.schema.resolvers.marketplace import MarketplaceMutation, Market
 from graphql_api.schema.resolvers.metadata import MetadataQuery
 from graphql_api.schema.resolvers.push import PushMutation, PushQuery
 from graphql_api.schema.resolvers.search import SearchQuery
+from graphql_api.schema.resolvers.user import UserQuery
 from graphql_api.schema.resolvers.widgets import WidgetQuery
 
 
@@ -25,6 +26,7 @@ class Query(
     MarketplaceQuery,
     PushQuery,
     WidgetQuery,
+    UserQuery,
     InternalQuery,
 ):
     pass
