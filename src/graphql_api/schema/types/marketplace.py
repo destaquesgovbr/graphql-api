@@ -15,6 +15,9 @@ from datetime import datetime
 from typing import Optional
 
 import strawberry
+from strawberry.types import Info
+
+from graphql_api.schema.types.clipping import Release, release_from_data
 
 
 @strawberry.type
@@ -45,6 +48,41 @@ class MarketplaceListing:
     active: bool = True
     has_liked: Optional[bool] = None
     has_followed: Optional[bool] = None
+
+    @strawberry.field(
+        description=(
+            "Entregas historicas (releases) deste listing publico. "
+            "Ordenadas por createdAt desc. Conteudo PUBLICO: nao exige "
+            "autenticacao, pois um listing ativo ja e publico. Listing "
+            "inativo/despublicado nunca expoe releases (retorna lista vazia)."
+        )
+    )
+    def releases(
+        self,
+        info: Info,
+        limit: int = 10,
+        before: Optional[datetime] = None,
+    ) -> list[Release]:
+        # Seguranca: so listing ATIVO expoe releases. Como `self` ja foi
+        # resolvido a partir do listing, um listing inativo/despublicado
+        # (`active=False`) nunca vaza releases — defesa em profundidade
+        # (o `marketplaceListing(id)` ja filtra inativos, mas garantimos aqui
+        # tambem para qualquer caminho que construa o tipo).
+        if not self.active:
+            return []
+
+        ctx = info.context
+        ds = getattr(ctx, "firestore_ds", None)
+        if ds is None:
+            return []
+
+        # Clamp limit no intervalo [1, 100] para evitar abuso.
+        safe_limit = max(1, min(int(limit), 100))
+
+        data_list = ds.get_releases(
+            self.source_clipping_id, limit=safe_limit, before=before
+        )
+        return [release_from_data(d) for d in data_list]
 
 
 @strawberry.type
