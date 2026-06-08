@@ -4,6 +4,7 @@ import strawberry
 from strawberry.types import Info
 
 from graphql_api.datasources.embeddings import EmbeddingsDatasource
+from graphql_api.datasources.typesense import COLLECTION_NAME
 from graphql_api.schema.types.article import Article, ArticleFilter, ArticlesResult
 from graphql_api.schema.types.search import SearchSuggestion
 
@@ -118,7 +119,7 @@ async def resolve_search(
                 f"content_embedding:([{vector_str}], k:256, alpha:{effective_alpha})"
             )
 
-    result = typesense_client.collections["articles"].documents.search(params)
+    result = typesense_client.collections[COLLECTION_NAME].documents.search(params)
 
     articles = [_hit_to_article(hit) for hit in _iter_hits(result)]
     found = result.get("found", 0)
@@ -142,7 +143,7 @@ async def resolve_search_suggestions(
         "include_fields": "unique_id,title",
     }
 
-    result = typesense_client.collections["articles"].documents.search(params)
+    result = typesense_client.collections[COLLECTION_NAME].documents.search(params)
 
     return [
         SearchSuggestion(
