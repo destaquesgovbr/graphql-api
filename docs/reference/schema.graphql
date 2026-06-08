@@ -70,6 +70,14 @@ type Article {
   agencyName: String
   publishedAt: DateTime
   extractedAt: DateTime
+  theme1Level1Code: String
+  theme1Level1Label: String
+  theme1Level2Code: String
+  theme1Level2Label: String
+  theme1Level3Code: String
+  theme1Level3Label: String
+  mostSpecificThemeCode: String
+  mostSpecificThemeLabel: String
 }
 
 input ArticleFilter {
@@ -78,6 +86,8 @@ input ArticleFilter {
   tags: [String!] = null
   startDate: String = null
   endDate: String = null
+  themeLabel: String = null
+  dedup: Boolean = null
 }
 
 type ArticlesResult {
@@ -407,7 +417,7 @@ type Query {
   article(uniqueId: String!): Article
 
   """Search articles with keyword or semantic search"""
-  search(query: String!, filter: ArticleFilter = null, page: Int! = 1, semantic: Boolean! = false): ArticlesResult!
+  search(query: String!, filter: ArticleFilter = null, page: Int! = 1, semantic: Boolean! = false, alpha: Float = null, dedup: Boolean! = false): ArticlesResult!
 
   """Get search suggestions for autocomplete"""
   searchSuggestions(query: String!): [SearchSuggestion!]!
@@ -442,7 +452,7 @@ type Query {
   clipping(id: String!): Clipping
 
   """
-  Busca um release por ID. Autorizacao espelha `MarketplaceListing.releases`: PUBLICO se o listing fonte do clipping esta ativo; caso contrario somente autor ou subscriber. Substitui o `getReleaseById` do portal. Retorna None se o release nao existe OU o caller nao esta autorizado.
+  Busca um release por ID. Autorizacao espelha `MarketplaceListing.releases`: PUBLICO se o listing fonte do clipping esta ativo; caso contrario somente autor ou subscriber. Substitui o `getReleaseById` do portal. Retorna None se o release nao existe OU o caller nao esta autorizado. Para o caller autorizado, popula `recortes` (filtros do clipping fonte) e `marketplaceListingId` (id do listing ativo, ou null).
   """
   release(id: String!): Release
 
@@ -496,6 +506,26 @@ type Query {
 
   """Fetch a batch of articles needing integrity checks"""
   integrityBatch(batchSize: Int! = 50): [IntegrityCandidateType!]!
+
+  """
+  Artigos relacionados a `uniqueId`, baseados no theme-code (Typesense). Replica a logica do portal: usa most_specific_theme_code quando presente, senao theme_1_level_1_code; exclui o proprio artigo; ordena por publishedAt desc; deduplica por content_hash. PUBLICO. (Distinto do `similarArticles` interno, baseado em embedding postgres.)
+  """
+  relatedArticles(uniqueId: String!, limit: Int! = 4): [Article!]!
+
+  """
+  Contagem de artigos por code de tema (nivel `level`) nos ultimos `days` dias. `label` e None (o portal mapeia pela config). PUBLICO.
+  """
+  themeArticleCounts(days: Int! = 30, level: Int! = 1): [ThemeCount!]!
+
+  """
+  Artigos de um release (pagina de artigos do release). Autorizacao espelha `release(id)`: PUBLICO se o listing fonte do clipping esta ativo; caso contrario somente autor ou subscriber. Retorna [] se negado ou inexistente. Janela temporal [refTime - sinceHours, refTime] (default ultimas 24h). Para cada recorte: se tem keywords, uma busca por keyword (q em title,summary) + filtro (themes OR-levels + agencies + janela); senao, uma busca q=* filter-only. Une tudo, deduplica por uniqueId, ordena por publishedAt desc. PUBLICO (sujeito a auth do release).
+  """
+  releaseArticles(id: String!): [Article!]!
+
+  """
+  Estima quantos artigos um recorte capturaria nas ultimas `sinceHours` horas. Replica `lib/estimate-recorte-count.ts`: filtro = themes OR-levels + agencies OR'd + published_at >= now-sinceHours; para keywords, conta por keyword (q em title,summary) e retorna o MAX; sem keywords, uma unica contagem. Substitui o mock `clippingEstimate`. PUBLICO.
+  """
+  estimateRecorteCount(themes: [String!]!, agencies: [String!]!, keywords: [String!]!, sinceHours: Int! = 24): Int!
 }
 
 type Recorte {
@@ -515,6 +545,8 @@ input RecorteInput {
 
 type Release {
   digestPreview: String
+  recortes: [Recorte!]!
+  marketplaceListingId: String
   id: String!
   clippingId: String!
   clippingName: String!
@@ -563,6 +595,12 @@ type Tag {
 type Theme {
   code: String!
   label: String!
+}
+
+type ThemeCount {
+  code: String!
+  label: String
+  count: Int!
 }
 
 """Theme statistics with article count"""

@@ -1,0 +1,290 @@
+"""Resolvers de conteudo publico (Typesense) — Fase 2A, Stream B3.
+
+Arquivo novo para nao colidir com `articles.py`/`search.py`. Expoe:
+
+- `relatedArticles(uniqueId, limit)` — artigos relacionados por theme-code
+  (replica `artigos/[articleId]/actions.ts:getSimilarArticles` do portal,
+  NAO a similaridade interna por embedding postgres; nome distinto do
+  `similarArticles` interno para evitar colisao no root Query).
+- `themeArticleCounts(days, level)` — contagem de artigos por code de tema
+  (usa `datasource.theme_counts`).
+- `releaseArticles(id)` — artigos de um release (pagina de artigos do release),
+  com autorizacao espelhando o resolver `release(id)`.
+- `estimateRecorteCount(themes, agencies, keywords, sinceHours)` — estimativa
+  real (substitui o mock `clippingEstimate`), replica
+  `lib/estimate-recorte-count.ts` do portal.
+
+Convencoes do repo: IDs scalar = String; resolvers podem ser sync; mock de
+datasource nos testes.
+"""
+
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+import strawberry
+from strawberry.types import Info
+
+from graphql_api.datasources.typesense import ArticleDocument
+from graphql_api.schema.types.article import Article
+
+
+@strawberry.type
+class ThemeCount:
+    """Contagem de artigos para um code de tema.
+
+    `label` e best-effort/None — o portal mapeia o label pela config dele
+    (`temas` config); o Typesense `group_by` so retorna o code (`group_key`).
+    """
+
+    code: str
+    label: Optional[str] = None
+    count: int = 0
+
+
+def _to_graphql_article(doc: ArticleDocument) -> Article:
+    """Converte um `ArticleDocument` (datasource) para o tipo Strawberry `Article`,
+    populando os 8 campos de tema (este resolver depende deles para similar/release).
+    """
+    return Article(
+        unique_id=doc.unique_id,
+        title=doc.title,
+        url=doc.url,
+        image=doc.image,
+        video_url=doc.video_url,
+        content=doc.content,
+        summary=doc.summary,
+        subtitle=doc.subtitle,
+        editorial_lead=doc.editorial_lead,
+        category=doc.category,
+        tags=doc.tags,
+        agency=doc.agency,
+        agency_name=doc.agency_name,
+        published_at=doc.published_at,
+        extracted_at=doc.extracted_at,
+        theme_1_level_1_code=doc.theme_1_level_1_code,
+        theme_1_level_1_label=doc.theme_1_level_1_label,
+        theme_1_level_2_code=doc.theme_1_level_2_code,
+        theme_1_level_2_label=doc.theme_1_level_2_label,
+        theme_1_level_3_code=doc.theme_1_level_3_code,
+        theme_1_level_3_label=doc.theme_1_level_3_label,
+        most_specific_theme_code=doc.most_specific_theme_code,
+        most_specific_theme_label=doc.most_specific_theme_label,
+    )
+
+
+def _published_at_ts(doc: ArticleDocument) -> float:
+    """Timestamp (epoch) de `published_at` para ordenacao desc; None -> 0."""
+    if doc.published_at is None:
+        return 0.0
+    return doc.published_at.timestamp()
+
+
+@strawberry.type
+class PublicContentQuery:
+    @strawberry.field(
+        description=(
+            "Artigos relacionados a `uniqueId`, baseados no theme-code (Typesense). "
+            "Replica a logica do portal: usa most_specific_theme_code quando "
+            "presente, senao theme_1_level_1_code; exclui o proprio artigo; "
+            "ordena por publishedAt desc; deduplica por content_hash. PUBLICO. "
+            "(Distinto do `similarArticles` interno, baseado em embedding postgres.)"
+        )
+    )
+    def related_articles(
+        self,
+        info: Info,
+        unique_id: str,
+        limit: int = 4,
+    ) -> list[Article]:
+        ctx = info.context
+        ds = ctx.typesense_ds
+        if ds is None:
+            return []
+
+        base = ds.get_article_by_id(unique_id)
+        if base is None:
+            return []
+
+        # Code-base: most_specific_theme_code se houver, senao L1. O datasource
+        # ja faz OR-across-levels para cada code em `themes`, exatamente como o
+        # portal (theme_1_level_1/2/3_code:=code OR'd).
+        theme_code = base.most_specific_theme_code or base.theme_1_level_1_code
+        if not theme_code:
+            return []
+
+        # Pede um a mais do que `limit` para compensar a possivel remocao do
+        # proprio artigo (o filtro unique_id:!= e feito in-resolver).
+        result = ds.search_articles(
+            page=1,
+            limit=limit + 1,
+            themes=[theme_code],
+            dedup=True,
+        )
+
+        similar = [a for a in result.articles if a.unique_id != unique_id]
+        return [_to_graphql_article(a) for a in similar[:limit]]
+
+    @strawberry.field(
+        description=(
+            "Contagem de artigos por code de tema (nivel `level`) nos ultimos "
+            "`days` dias. `label` e None (o portal mapeia pela config). PUBLICO."
+        )
+    )
+    def theme_article_counts(
+        self,
+        info: Info,
+        days: int = 30,
+        level: int = 1,
+    ) -> list[ThemeCount]:
+        ctx = info.context
+        ds = ctx.typesense_ds
+        if ds is None:
+            return []
+
+        counts = ds.theme_counts(level=level, days=days)
+        return [ThemeCount(code=code, label=None, count=count) for code, count in counts]
+
+    @strawberry.field(
+        description=(
+            "Artigos de um release (pagina de artigos do release). Autorizacao "
+            "espelha `release(id)`: PUBLICO se o listing fonte do clipping esta "
+            "ativo; caso contrario somente autor ou subscriber. Retorna [] se "
+            "negado ou inexistente. Janela temporal [refTime - sinceHours, "
+            "refTime] (default ultimas 24h). Para cada recorte: se tem "
+            "keywords, uma busca por keyword (q em title,summary) + filtro "
+            "(themes OR-levels + agencies + janela); senao, uma busca q=* "
+            "filter-only. Une tudo, deduplica por uniqueId, ordena por "
+            "publishedAt desc. PUBLICO (sujeito a auth do release)."
+        )
+    )
+    def release_articles(self, info: Info, id: str) -> list[Article]:
+        ctx = info.context
+        firestore = ctx.firestore_ds
+        typesense = ctx.typesense_ds
+        if firestore is None or typesense is None:
+            return []
+
+        release_data = firestore.get_release(id)
+        if release_data is None:
+            return []
+
+        # --- Autorizacao espelhando release(id) -----------------------------
+        listing = firestore.get_marketplace_listing_for_clipping(
+            release_data.clipping_id
+        )
+        clipping = firestore.get_clipping(release_data.clipping_id)
+
+        if listing is None:
+            # Sem listing ativo: so autor ou subscriber. Exige sessao.
+            user = getattr(ctx, "user", None)
+            if user is None:
+                return []
+            is_author = (
+                clipping is not None
+                and clipping.author_user_id is not None
+                and clipping.author_user_id == user.id
+            )
+            if not is_author:
+                sub = firestore.get_subscription(user.id, release_data.clipping_id)
+                if sub is None:
+                    return []
+
+        if clipping is None:
+            return []
+
+        # --- Janela temporal [ref_time - since_hours, ref_time] -------------
+        ref_time = release_data.ref_time or datetime.now(tz=timezone.utc)
+        since_hours = release_data.since_hours or 24
+        start = ref_time - timedelta(hours=since_hours)
+        start_iso = start.isoformat()
+        end_iso = ref_time.isoformat()
+
+        # --- Uniao dos recortes, dedup por unique_id ------------------------
+        seen: dict[str, ArticleDocument] = {}
+
+        def _collect(q: str) -> None:
+            res = typesense.search_articles(
+                page=1,
+                limit=100,
+                q=q,
+                query_by="title,summary" if q != "*" else None,
+                themes=themes or None,
+                agencies=agencies or None,
+                start_date=start_iso,
+                end_date=end_iso,
+            )
+            for doc in res.articles:
+                if doc.unique_id not in seen:
+                    seen[doc.unique_id] = doc
+
+        for recorte in clipping.recortes:
+            themes = recorte.get("themes") or []
+            agencies = recorte.get("agencies") or []
+            keywords = recorte.get("keywords") or []
+
+            # Sem nenhum filtro o recorte nao contribui (evita varrer todo o
+            # indice no intervalo).
+            if not themes and not agencies and not keywords:
+                continue
+
+            if keywords:
+                # Uma busca por keyword (q em title,summary), unindo os hits.
+                for kw in keywords:
+                    _collect(kw)
+            else:
+                # Sem keywords: busca filter-only (q=*).
+                _collect("*")
+
+        ordered = sorted(seen.values(), key=_published_at_ts, reverse=True)
+        return [_to_graphql_article(doc) for doc in ordered]
+
+    @strawberry.field(
+        description=(
+            "Estima quantos artigos um recorte capturaria nas ultimas "
+            "`sinceHours` horas. Replica `lib/estimate-recorte-count.ts`: filtro "
+            "= themes OR-levels + agencies OR'd + published_at >= now-sinceHours; "
+            "para keywords, conta por keyword (q em title,summary) e retorna o "
+            "MAX; sem keywords, uma unica contagem. Substitui o mock "
+            "`clippingEstimate`. PUBLICO."
+        )
+    )
+    def estimate_recorte_count(
+        self,
+        info: Info,
+        themes: list[str],
+        agencies: list[str],
+        keywords: list[str],
+        since_hours: int = 24,
+    ) -> int:
+        ctx = info.context
+        ds = ctx.typesense_ds
+        if ds is None:
+            return 0
+
+        # Sem nenhum filtro -> 0 (espelha `hasFilters` do portal).
+        if not themes and not agencies and not keywords:
+            return 0
+
+        start = datetime.now(tz=timezone.utc) - timedelta(hours=since_hours)
+        start_iso = start.isoformat()
+
+        def _count(q: str) -> int:
+            result = ds.search_articles(
+                page=1,
+                limit=0,
+                q=q,
+                query_by="title,summary" if q != "*" else None,
+                themes=themes or None,
+                agencies=agencies or None,
+                start_date=start_iso,
+            )
+            return result.found
+
+        if not keywords:
+            return _count("*")
+
+        # MAX across keywords. Cada keyword vira um `q` real sobre title,summary
+        # (o datasource agora aceita q/query_by); o filtro estrutural (themes
+        # OR-levels + agencies + janela) e o mesmo em todas as buscas. Espelha
+        # `lib/estimate-recorte-count.ts` do portal.
+        return max(_count(kw) for kw in keywords)

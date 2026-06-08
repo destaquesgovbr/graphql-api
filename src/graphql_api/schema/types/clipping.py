@@ -150,6 +150,15 @@ class Release:
     # (nao `strawberry.auto`): o `digest` raw nao e exposto no schema; so este
     # preview computado. Exposto como `digestPreview` (camelCase).
     digest_preview: Optional[str] = None
+    # Recortes (filtros) do clipping fonte. So populado pelo resolver top-level
+    # `release(id)`; nos outros contextos que retornam `Release`
+    # (`clipping.releases`, `marketplaceListing.releases`) fica vazio — esses
+    # consumidores nao selecionam o campo.
+    recortes: list[Recorte] = strawberry.field(default_factory=list)
+    # Id do listing de marketplace ATIVO do clipping fonte (para link "ver no
+    # marketplace"); None se nao publicado. Tambem so populado pelo
+    # `release(id)` top-level.
+    marketplace_listing_id: Optional[str] = None
 
 
 def _digest_preview(digest: str) -> str:

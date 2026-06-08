@@ -211,7 +211,9 @@ class ClippingQuery:
             "`MarketplaceListing.releases`: PUBLICO se o listing fonte do "
             "clipping esta ativo; caso contrario somente autor ou subscriber. "
             "Substitui o `getReleaseById` do portal. Retorna None se o release "
-            "nao existe OU o caller nao esta autorizado."
+            "nao existe OU o caller nao esta autorizado. Para o caller "
+            "autorizado, popula `recortes` (filtros do clipping fonte) e "
+            "`marketplaceListingId` (id do listing ativo, ou null)."
         ),
     )
     def release(self, info: Info, id: str) -> Optional["Release"]:
@@ -225,27 +227,40 @@ class ClippingQuery:
         # Autorizacao espelhando MarketplaceListing.releases: PUBLICO se o
         # listing fonte do clipping esta ativo.
         listing = ds.get_marketplace_listing_for_clipping(release_data.clipping_id)
-        if listing is not None:
-            # Listing ativo -> release publica.
-            return release_from_data(release_data)
-
-        # Sem listing ativo: so autor ou subscriber. Exige sessao.
-        user = getattr(ctx, "user", None)
-        if user is None:
-            return None
-
         clipping = ds.get_clipping(release_data.clipping_id)
-        is_author = (
-            clipping is not None
-            and clipping.author_user_id is not None
-            and clipping.author_user_id == user.id
-        )
-        if not is_author:
-            sub = ds.get_subscription(user.id, release_data.clipping_id)
-            if sub is None:
+
+        if listing is None:
+            # Sem listing ativo: so autor ou subscriber. Exige sessao.
+            user = getattr(ctx, "user", None)
+            if user is None:
                 return None
 
-        return release_from_data(release_data)
+            is_author = (
+                clipping is not None
+                and clipping.author_user_id is not None
+                and clipping.author_user_id == user.id
+            )
+            if not is_author:
+                sub = ds.get_subscription(user.id, release_data.clipping_id)
+                if sub is None:
+                    return None
+
+        # Autorizado (publico via listing ativo, ou autor/subscriber). Popula
+        # os campos contextuais: id do listing ativo + recortes do clipping.
+        release = release_from_data(release_data)
+        release.marketplace_listing_id = listing.get("id") if listing else None
+        if clipping is not None:
+            release.recortes = [
+                Recorte(
+                    id=r.get("id", ""),
+                    title=r.get("title", ""),
+                    themes=r.get("themes", []),
+                    agencies=r.get("agencies", []),
+                    keywords=r.get("keywords", []),
+                )
+                for r in clipping.recortes
+            ]
+        return release
 
     @strawberry.field(
         description="Estima o numero de artigos para um clipping",
