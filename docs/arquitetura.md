@@ -33,6 +33,14 @@ flowchart TB
     schema --> fs & pg & ts
 ```
 
+!!! info "Portal = consumidor único via GraphQL"
+    Após o desacoplamento BD→GraphQL, o **portal não fala mais direto** com
+    Firestore nem Typesense nas superfícies de conteúdo público e de features.
+    Tudo passa por este serviço: artigos/busca/temas/relacionados/contagens
+    (Typesense) e clipping/marketplace/releases/telegram (Firestore). Os únicos
+    backends que o portal ainda toca diretamente são os de borda (auth/sessão),
+    não os de dados.
+
 ## Code-first com Strawberry
 
 O schema é **code-first**: tipos e resolvers são classes Python decoradas

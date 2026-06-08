@@ -20,7 +20,10 @@ flowchart LR
 
 - **Desacoplamento.** Os consumidores deixam de conhecer o formato dos backends.
   Trocar Firestore por outra coisa, ou mudar o JOIN do Postgres, não vaza para o
-  portal nem para os workers.
+  portal nem para os workers. O portal já consome o graphql-api como **fonte
+  única** tanto para **conteúdo público** (artigos, busca, temas, relacionados,
+  contagens) quanto para as **features** (clipping/marketplace, releases,
+  telegram) — sem acesso direto a Firestore/Typesense nessas superfícies.
 - **Schema tipado e único.** Um contrato versionado, introspectável, com um único
   ponto de evolução. A referência é [gerada do código](reference/schema.md).
 - **Auth centralizada.** Validação de JWT (usuários) e OIDC (service accounts) em

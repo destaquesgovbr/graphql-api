@@ -41,6 +41,33 @@ resolvida por contexto: `Clipping.isAuthor` compara `authorUserId` com
 `ctx.user.id`, e resolvers de mutação (editar/excluir clipping) exigem que o
 usuário seja o autor.
 
+### Resolvers por nível de auth
+
+Com o portal consumindo o graphql-api como fonte única, a superfície cresceu.
+Resumo dos níveis (a referência canônica é o [SDL](reference/schema.md)):
+
+| Nível | Resolvers (entre os novos) |
+|-------|----------------------------|
+| **Público** (sem header) | `articles`, `search`, `themes`, `agencies`, `popularTags`, `relatedArticles`, `themeArticleCounts`, `estimateRecorteCount` |
+| **Misto** (público se fonte ativa, senão autor/subscriber) | `release(id)`, `releaseArticles(id)`, `MarketplaceListing.releases`, `Clipping.releases` |
+| **Usuário** (`IsAuthenticated`) | `clippings`, `myFollowedListings`, `currentUserHasTelegramLinked`, mutations de clipping/marketplace/push |
+| **Interno** (`IsInternal`, service account) | `similarArticles`, `newsForTypesense`, `upsertFeatures`, … |
+
+### 3. Autorização mista (releases)
+
+`release(id)` e `releaseArticles(id)` não são nem puramente públicos nem
+puramente autenticados — a regra **espelha `MarketplaceListing.releases`**:
+
+- **Público** se o listing-fonte do clipping está **ativo** (um listing ativo já
+  é conteúdo público, então suas entregas também são).
+- Caso contrário, só o **autor** ou um **subscriber** do clipping podem ver.
+- Listing inativo/despublicado nunca expõe releases. `release(id)` retorna `None`
+  e `releaseArticles(id)` retorna `[]` quando o caller não está autorizado (ou o
+  release não existe) — sem distinguir os dois casos, para não vazar existência.
+
+Só para o caller autorizado, `release(id)` popula `recortes` (filtros do clipping
+fonte) e `marketplaceListingId` (id do listing ativo, ou `null`).
+
 ### O token no browser (decisão da R1)
 
 Para o urql client-side enviar o `Bearer`, o portal expõe o `accessToken` na
