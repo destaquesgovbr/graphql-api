@@ -1,8 +1,6 @@
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
-import typesense.exceptions
-
 from graphql_api.datasources.typesense import TypesenseDatasource
 
 
@@ -323,9 +321,9 @@ class TestBackwardCompat:
 
 
 class TestGetArticleById:
-    def test_get_article_by_id(self):
+    def test_get_article_by_id_uses_search_with_filter_by(self):
         doc = _sample_doc()
-        client = _mock_client(retrieve_return=doc)
+        client = _mock_client(search_return={"hits": [_make_hit(doc)], "found": 1})
         ds = TypesenseDatasource(client)
 
         article = ds.get_article_by_id("abc-123")
@@ -334,10 +332,26 @@ class TestGetArticleById:
         assert article.unique_id == "abc-123"
         assert article.title == "Test Article"
 
+        # Deve usar busca (permitida pela search-only key), não .documents[id].retrieve()
+        params = client.collections["news"].documents.search.call_args[0][0]
+        assert "filter_by" in params
+        assert "unique_id:=" in params["filter_by"]
+        assert "abc-123" in params["filter_by"]
+        assert params["per_page"] == 1
+
+    def test_get_article_by_id_does_not_call_retrieve(self):
+        doc = _sample_doc()
+        client = _mock_client(search_return={"hits": [_make_hit(doc)], "found": 1})
+        ds = TypesenseDatasource(client)
+
+        ds.get_article_by_id("abc-123")
+
+        # Nenhum acesso a documents[id] (operação não permitida pela search-only key)
+        collection = client.collections["news"]
+        assert not collection.documents.__getitem__.called
+
     def test_get_article_not_found_returns_none(self):
-        client = _mock_client(
-            retrieve_side_effect=typesense.exceptions.ObjectNotFound("Not found")
-        )
+        client = _mock_client(search_return={"hits": [], "found": 0})
         ds = TypesenseDatasource(client)
 
         article = ds.get_article_by_id("nonexistent")

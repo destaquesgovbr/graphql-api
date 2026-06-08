@@ -270,8 +270,21 @@ class TypesenseDatasource:
         return counts
 
     def get_article_by_id(self, unique_id: str) -> Optional[ArticleDocument]:
-        try:
-            doc = self.client.collections[COLLECTION_NAME].documents[unique_id].retrieve()
+        """Busca um artigo por `unique_id` via SEARCH (não `.documents[id].retrieve()`).
+
+        `retrieve()` é uma operação não-search que a search-only API key não pode
+        executar (Typesense responde 401). Usar um filtro exato por `unique_id`
+        numa busca normal funciona com a search-only key e mantém o mesmo
+        mapeamento de `search_articles`.
+        """
+        result = self.client.collections[COLLECTION_NAME].documents.search(
+            {
+                "q": "*",
+                "query_by": "title",
+                "filter_by": f"unique_id:=`{unique_id}`",
+                "per_page": 1,
+            }
+        )
+        for doc in _iter_documents(result):
             return _document_to_article(doc)
-        except typesense.exceptions.ObjectNotFound:
-            return None
+        return None
