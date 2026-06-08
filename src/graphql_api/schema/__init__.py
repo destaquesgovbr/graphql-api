@@ -9,6 +9,7 @@ from graphql_api.schema.resolvers.internal_mutations import InternalMutation
 from graphql_api.schema.resolvers.internal_queries import InternalQuery
 from graphql_api.schema.resolvers.marketplace import MarketplaceMutation, MarketplaceQuery
 from graphql_api.schema.resolvers.metadata import MetadataQuery
+from graphql_api.schema.resolvers.public_content import PublicContentQuery
 from graphql_api.schema.resolvers.push import PushMutation, PushQuery
 from graphql_api.schema.resolvers.search import SearchQuery
 from graphql_api.schema.resolvers.user import UserQuery
@@ -28,6 +29,7 @@ class Query(
     WidgetQuery,
     UserQuery,
     InternalQuery,
+    PublicContentQuery,
 ):
     pass
 

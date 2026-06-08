@@ -27,6 +27,14 @@ class ArticleDocument:
     agency_name: Optional[str] = None
     published_at: Optional[datetime] = None
     extracted_at: Optional[datetime] = None
+    theme_1_level_1_code: Optional[str] = None
+    theme_1_level_1_label: Optional[str] = None
+    theme_1_level_2_code: Optional[str] = None
+    theme_1_level_2_label: Optional[str] = None
+    theme_1_level_3_code: Optional[str] = None
+    theme_1_level_3_label: Optional[str] = None
+    most_specific_theme_code: Optional[str] = None
+    most_specific_theme_label: Optional[str] = None
 
 
 @dataclass
@@ -61,7 +69,27 @@ def _document_to_article(doc: dict) -> ArticleDocument:
         agency_name=doc.get("agency_name"),
         published_at=_parse_timestamp(doc.get("published_at")),
         extracted_at=_parse_timestamp(doc.get("extracted_at")),
+        theme_1_level_1_code=doc.get("theme_1_level_1_code"),
+        theme_1_level_1_label=doc.get("theme_1_level_1_label"),
+        theme_1_level_2_code=doc.get("theme_1_level_2_code"),
+        theme_1_level_2_label=doc.get("theme_1_level_2_label"),
+        theme_1_level_3_code=doc.get("theme_1_level_3_code"),
+        theme_1_level_3_label=doc.get("theme_1_level_3_label"),
+        most_specific_theme_code=doc.get("most_specific_theme_code"),
+        most_specific_theme_label=doc.get("most_specific_theme_label"),
     )
+
+
+def _iter_documents(response: dict):
+    """Itera os documentos de uma resposta de busca, lidando com `hits`
+    (busca normal) e `grouped_hits` (quando `group_by` está ativo)."""
+    if "grouped_hits" in response:
+        for group in response["grouped_hits"]:
+            for hit in group.get("hits", []):
+                yield hit["document"]
+        return
+    for hit in response.get("hits", []):
+        yield hit["document"]
 
 
 COLLECTION_NAME = "news"
@@ -137,6 +165,12 @@ class TypesenseDatasource:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         tags: Optional[list[str]] = None,
+        theme_label: Optional[str] = None,
+        dedup: bool = False,
+        vector: Optional[list[float]] = None,
+        alpha: Optional[float] = None,
+        q: str = "*",
+        query_by: Optional[str] = None,
     ) -> SearchResult:
         filter_parts: list[str] = []
 
@@ -145,10 +179,16 @@ class TypesenseDatasource:
             filter_parts.append(f"agency:[{joined}]")
 
         if themes:
+            # OR através de L1/L2/L3 code para cada code informado; tudo OR'd.
             theme_conditions = []
             for theme in themes:
                 theme_conditions.append(f"theme_1_level_1_code:={theme}")
-            filter_parts.append(" || ".join(theme_conditions))
+                theme_conditions.append(f"theme_1_level_2_code:={theme}")
+                theme_conditions.append(f"theme_1_level_3_code:={theme}")
+            filter_parts.append("(" + " || ".join(theme_conditions) + ")")
+
+        if theme_label:
+            filter_parts.append(f"theme_1_level_1_label:={theme_label}")
 
         if tags:
             joined = ", ".join(f"`{t}`" for t in tags)
@@ -167,23 +207,67 @@ class TypesenseDatasource:
         filter_by = " && ".join(filter_parts) if filter_parts else ""
 
         search_params = {
-            "q": "*",
+            "q": q,
             "per_page": limit,
             "page": page,
             "sort_by": "published_at:desc",
         }
+        # Busca por keyword real: só quando q != "*" (wildcard default).
+        # Aí precisamos de query_by para o Typesense saber em que campos buscar.
+        if q != "*" and query_by:
+            search_params["query_by"] = query_by
         if filter_by:
             search_params["filter_by"] = filter_by
 
+        if vector is not None:
+            # Busca híbrida: alpha controla peso semântico vs. keyword.
+            # Default 0.3 mantém o comportamento legado quando alpha=None.
+            effective_alpha = 0.3 if alpha is None else alpha
+            vector_str = ", ".join(str(v) for v in vector)
+            search_params["vector_query"] = (
+                f"content_embedding:([{vector_str}], alpha:{effective_alpha})"
+            )
+
+        if dedup:
+            search_params["group_by"] = "content_hash"
+            search_params["group_limit"] = 1
+
         response = self.client.collections[COLLECTION_NAME].documents.search(search_params)
 
-        articles = [_document_to_article(hit["document"]) for hit in response.get("hits", [])]
+        articles = [_document_to_article(doc) for doc in _iter_documents(response)]
 
         return SearchResult(
             articles=articles,
             page=page,
             found=response.get("found", 0),
         )
+
+    def theme_counts(self, level: int, days: int) -> list[tuple[str, int]]:
+        """Contagem de artigos por code de tema (nível `level`), nos últimos `days` dias.
+
+        Usa `group_by:'theme_1_level_{level}_code'` + `filter_by:'published_at:>=<now-days>'`
+        + `per_page:250`, lendo `grouped_hits[].group_key[0]` (code) + `.found` (contagem).
+        Espelha `temas/actions.ts:getThemeArticleCounts` do portal.
+        """
+        since = datetime.now(tz=timezone.utc).timestamp() - days * 86400
+        search_params = {
+            "q": "*",
+            "query_by": "title",
+            "per_page": 250,
+            "group_by": f"theme_1_level_{level}_code",
+            "group_limit": 1,
+            "filter_by": f"published_at:>={int(since)}",
+        }
+
+        response = self.client.collections[COLLECTION_NAME].documents.search(search_params)
+
+        counts: list[tuple[str, int]] = []
+        for group in response.get("grouped_hits", []):
+            key = group.get("group_key") or []
+            if not key:
+                continue
+            counts.append((key[0], group.get("found", 0)))
+        return counts
 
     def get_article_by_id(self, unique_id: str) -> Optional[ArticleDocument]:
         try:

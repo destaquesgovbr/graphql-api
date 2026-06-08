@@ -11,6 +11,7 @@ def _build_search_params(
     query: str,
     filter_input: Optional[ArticleFilter],
     page: int,
+    dedup: bool = False,
 ) -> dict:
     """Build Typesense search parameters from query and filters."""
     params = {
@@ -36,6 +37,11 @@ def _build_search_params(
     if filter_parts:
         params["filter_by"] = " && ".join(filter_parts)
 
+    if dedup:
+        # Deduplica por content_hash (mesma notícia republicada por várias agências).
+        params["group_by"] = "content_hash"
+        params["group_limit"] = 1
+
     return params
 
 
@@ -58,7 +64,25 @@ def _hit_to_article(hit: dict) -> Article:
         agency_name=doc.get("agency_name"),
         published_at=doc.get("published_at"),
         extracted_at=doc.get("extracted_at"),
+        theme_1_level_1_code=doc.get("theme_1_level_1_code"),
+        theme_1_level_1_label=doc.get("theme_1_level_1_label"),
+        theme_1_level_2_code=doc.get("theme_1_level_2_code"),
+        theme_1_level_2_label=doc.get("theme_1_level_2_label"),
+        theme_1_level_3_code=doc.get("theme_1_level_3_code"),
+        theme_1_level_3_label=doc.get("theme_1_level_3_label"),
+        most_specific_theme_code=doc.get("most_specific_theme_code"),
+        most_specific_theme_label=doc.get("most_specific_theme_label"),
     )
+
+
+def _iter_hits(result: dict):
+    """Itera os hits de uma resposta, lidando com `hits` (busca normal) e
+    `grouped_hits` (quando `group_by`/dedup está ativo)."""
+    if "grouped_hits" in result:
+        for group in result["grouped_hits"]:
+            yield from group.get("hits", [])
+        return
+    yield from result.get("hits", [])
 
 
 async def resolve_search(
@@ -66,26 +90,36 @@ async def resolve_search(
     filter: Optional[ArticleFilter] = None,
     page: int = 1,
     semantic: bool = False,
+    alpha: Optional[float] = None,
+    dedup: bool = False,
     typesense_client: object = None,
     embeddings_ds: Optional[EmbeddingsDatasource] = None,
 ) -> ArticlesResult:
-    """Search articles with optional semantic (hybrid) search."""
+    """Search articles with optional semantic (hybrid) search.
+
+    `alpha` controla o peso híbrido (keyword vs. semântico) no `vector_query`;
+    se None, mantém o legado 0.3. `dedup=True` aplica group_by content_hash
+    (keyword e semântico).
+    """
     if not query or not query.strip():
         raise ValueError("Query must not be empty")
 
-    params = _build_search_params(query, filter, page)
+    params = _build_search_params(query, filter, page, dedup=dedup)
 
     if semantic:
         if embeddings_ds is None:
             embeddings_ds = EmbeddingsDatasource()
         vector = await embeddings_ds.generate_embedding(query)
         if vector is not None:
+            effective_alpha = 0.3 if alpha is None else alpha
             vector_str = ",".join(str(v) for v in vector)
-            params["vector_query"] = f"content_embedding:([{vector_str}], k:256, alpha:0.3)"
+            params["vector_query"] = (
+                f"content_embedding:([{vector_str}], k:256, alpha:{effective_alpha})"
+            )
 
     result = typesense_client.collections["articles"].documents.search(params)
 
-    articles = [_hit_to_article(hit) for hit in result.get("hits", [])]
+    articles = [_hit_to_article(hit) for hit in _iter_hits(result)]
     found = result.get("found", 0)
 
     return ArticlesResult(articles=articles, page=page, found=found)
@@ -127,6 +161,8 @@ class SearchQuery:
         filter: Optional[ArticleFilter] = None,
         page: int = 1,
         semantic: bool = False,
+        alpha: Optional[float] = None,
+        dedup: bool = False,
     ) -> ArticlesResult:
         from graphql_api.datasources.typesense import TypesenseDatasource
 
@@ -137,6 +173,8 @@ class SearchQuery:
             filter=filter,
             page=page,
             semantic=semantic,
+            alpha=alpha,
+            dedup=dedup,
             typesense_client=ts.client,
             embeddings_ds=embeddings_ds,
         )

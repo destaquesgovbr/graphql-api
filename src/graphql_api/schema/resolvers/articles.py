@@ -24,6 +24,14 @@ def _to_graphql_article(doc: ArticleDocument) -> Article:
         agency_name=doc.agency_name,
         published_at=doc.published_at,
         extracted_at=doc.extracted_at,
+        theme_1_level_1_code=doc.theme_1_level_1_code,
+        theme_1_level_1_label=doc.theme_1_level_1_label,
+        theme_1_level_2_code=doc.theme_1_level_2_code,
+        theme_1_level_2_label=doc.theme_1_level_2_label,
+        theme_1_level_3_code=doc.theme_1_level_3_code,
+        theme_1_level_3_label=doc.theme_1_level_3_label,
+        most_specific_theme_code=doc.most_specific_theme_code,
+        most_specific_theme_label=doc.most_specific_theme_label,
     )
 
 
@@ -48,6 +56,8 @@ class ArticleQuery:
             tags=filter.tags if filter else None,
             start_date=filter.start_date if filter else None,
             end_date=filter.end_date if filter else None,
+            theme_label=filter.theme_label if filter else None,
+            dedup=bool(filter.dedup) if filter else False,
         )
 
         return ArticlesResult(
