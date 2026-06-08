@@ -453,7 +453,7 @@ type Query {
   clipping(id: String!): Clipping
 
   """
-  Busca um release por ID. Autorizacao espelha `MarketplaceListing.releases`: PUBLICO se o listing fonte do clipping esta ativo; caso contrario somente autor ou subscriber. Substitui o `getReleaseById` do portal. Retorna None se o release nao existe OU o caller nao esta autorizado.
+  Busca um release por ID. Autorizacao espelha `MarketplaceListing.releases`: PUBLICO se o listing fonte do clipping esta ativo; caso contrario somente autor ou subscriber. Substitui o `getReleaseById` do portal. Retorna None se o release nao existe OU o caller nao esta autorizado. Para o caller autorizado, popula `recortes` (filtros do clipping fonte) e `marketplaceListingId` (id do listing ativo, ou null).
   """
   release(id: String!): Release
 
@@ -526,6 +526,8 @@ input RecorteInput {
 
 type Release {
   digestPreview: String
+  recortes: [Recorte!]!
+  marketplaceListingId: String
   id: String!
   clippingId: String!
   clippingName: String!

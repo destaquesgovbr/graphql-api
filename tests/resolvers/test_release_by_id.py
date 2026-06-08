@@ -45,9 +45,40 @@ QUERY = """
             digestPreview
             articlesCount
             createdAt
+            marketplaceListingId
+            recortes {
+                id
+                title
+                themes
+                agencies
+                keywords
+            }
         }
     }
 """
+
+
+def _clipping_with_recortes(
+    clipping_id: str = "clip-1", author_user_id: str = "user-author"
+) -> ClippingData:
+    return ClippingData(
+        id=clipping_id,
+        name="Meu Clipping",
+        recortes=[
+            {
+                "id": "rec-1",
+                "title": "Saude",
+                "themes": ["saude"],
+                "agencies": ["ms"],
+                "keywords": ["vacina"],
+            }
+        ],
+        schedule="0 8 * * *",
+        author_user_id=author_user_id,
+        active=True,
+        created_at=NOW,
+        updated_at=NOW,
+    )
 
 
 def _release(release_id: str = "rel-1", clipping_id: str = "clip-1") -> ReleaseData:
@@ -105,7 +136,7 @@ class TestReleaseById:
         """Listing fonte ativo -> release publica (anonimo pode ver)."""
         ds = MagicMock()
         ds.get_release.return_value = _release()
-        ds.get_clipping.return_value = _clipping()
+        ds.get_clipping.return_value = _clipping_with_recortes()
         # Listing fonte ativo (get_marketplace_listing retorna dict != None).
         ds.get_marketplace_listing_for_clipping.return_value = {
             "id": "listing-1",
@@ -119,6 +150,14 @@ class TestReleaseById:
         assert rel is not None
         assert rel["id"] == "rel-1"
         assert rel["digestPreview"] == "resumo do digest"
+        # marketplaceListingId vem do listing ativo; recortes vem do clipping.
+        assert rel["marketplaceListingId"] == "listing-1"
+        assert len(rel["recortes"]) == 1
+        assert rel["recortes"][0]["id"] == "rec-1"
+        assert rel["recortes"][0]["title"] == "Saude"
+        assert rel["recortes"][0]["themes"] == ["saude"]
+        assert rel["recortes"][0]["agencies"] == ["ms"]
+        assert rel["recortes"][0]["keywords"] == ["vacina"]
 
     def test_nonexistent_release_returns_none(self):
         ds = MagicMock()
@@ -147,7 +186,9 @@ class TestReleaseById:
     def test_author_can_read_private_release(self):
         ds = MagicMock()
         ds.get_release.return_value = _release()
-        ds.get_clipping.return_value = _clipping(author_user_id="user-author")
+        ds.get_clipping.return_value = _clipping_with_recortes(
+            author_user_id="user-author"
+        )
         ds.get_marketplace_listing_for_clipping.return_value = None
         ds.get_subscription.return_value = None
         result = test_schema.execute_sync(
@@ -156,7 +197,20 @@ class TestReleaseById:
             context_value=_ctx(ds, user_id="user-author"),
         )
         assert result.errors is None, f"Errors: {result.errors}"
-        assert result.data["release"]["id"] == "rel-1"
+        rel = result.data["release"]
+        assert rel["id"] == "rel-1"
+        # Sem listing ativo -> marketplaceListingId null; recortes ainda vem do clipping.
+        assert rel["marketplaceListingId"] is None
+        assert len(rel["recortes"]) == 1
+        assert rel["recortes"][0]["title"] == "Saude"
+
+    def test_release_sdl_exposes_recortes_and_listing_id(self):
+        """O tipo Release expoe os novos campos recortes + marketplaceListingId."""
+        sdl = test_schema.as_str()
+        assert "type Release {" in sdl
+        release_block = sdl.split("type Release {", 1)[1].split("}", 1)[0]
+        assert "recortes: [Recorte!]!" in release_block
+        assert "marketplaceListingId: String" in release_block
 
     def test_subscriber_can_read_private_release(self):
         ds = MagicMock()
