@@ -171,6 +171,7 @@ class TypesenseDatasource:
         alpha: Optional[float] = None,
         q: str = "*",
         query_by: Optional[str] = None,
+        sort_by: Optional[str] = "published_at:desc",
     ) -> SearchResult:
         filter_parts: list[str] = []
 
@@ -210,8 +211,11 @@ class TypesenseDatasource:
             "q": q,
             "per_page": limit,
             "page": page,
-            "sort_by": "published_at:desc",
         }
+        # sort_by=None => omitir a chave para o Typesense ordenar por relevância
+        # de text-match (correto para busca por keyword). Default mantém date-sort.
+        if sort_by is not None:
+            search_params["sort_by"] = sort_by
         # Busca por keyword real: só quando q != "*" (wildcard default).
         # Aí precisamos de query_by para o Typesense saber em que campos buscar.
         if q != "*" and query_by:

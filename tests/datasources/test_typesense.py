@@ -298,6 +298,35 @@ class TestKeywordQuery:
         assert "query_by" not in params
 
 
+class TestSortByOverride:
+    def test_default_sort_by_published_at_desc(self):
+        client = _mock_client(search_return={"hits": [], "found": 0})
+        ds = TypesenseDatasource(client)
+
+        ds.search_articles()
+
+        params = client.collections["news"].documents.search.call_args[0][0]
+        assert params["sort_by"] == "published_at:desc"
+
+    def test_sort_by_none_omits_key(self):
+        client = _mock_client(search_return={"hits": [], "found": 0})
+        ds = TypesenseDatasource(client)
+
+        ds.search_articles(sort_by=None)
+
+        params = client.collections["news"].documents.search.call_args[0][0]
+        assert "sort_by" not in params
+
+    def test_sort_by_custom_value(self):
+        client = _mock_client(search_return={"hits": [], "found": 0})
+        ds = TypesenseDatasource(client)
+
+        ds.search_articles(sort_by="title:asc")
+
+        params = client.collections["news"].documents.search.call_args[0][0]
+        assert params["sort_by"] == "title:asc"
+
+
 class TestBackwardCompat:
     def test_existing_call_without_new_params_works(self):
         doc = _sample_doc()
