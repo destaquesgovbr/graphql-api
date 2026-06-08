@@ -38,18 +38,31 @@ forma mais rápida de explorar a API.
     ```graphql
     query Artigos {
       articles(page: 1, limit: 5, filter: { agencies: ["ms"], themes: [] }) {
-        articles { uniqueId title url agency publishedAt }
+        articles {
+          uniqueId title url agency publishedAt
+          # hierarquia de temas (L1→L3) + o tema mais específico atribuído
+          theme1Level1Code theme1Level1Label
+          theme1Level2Code theme1Level2Label
+          theme1Level3Code theme1Level3Label
+          mostSpecificThemeCode mostSpecificThemeLabel
+        }
         page
         found
       }
     }
     ```
 
+    !!! note "`filter.themes` faz OR entre níveis"
+        Os codes em `themes` casam contra L1 **ou** L2 **ou** L3 — não só o nível
+        topo. Use `themeLabel` (label de L1) para filtrar por rótulo legível, e
+        `dedup: true` para agrupar variações do mesmo conteúdo por `content_hash`.
+
 === "Busca"
 
     ```graphql
     query Busca {
-      search(query: "vacinação", page: 1, semantic: false) {
+      # alpha = peso do vetor no ranking híbrido (0=keyword puro, 1=vetor puro)
+      search(query: "vacinação", page: 1, semantic: true, alpha: 0.3, dedup: true) {
         articles { uniqueId title }
         found
       }
@@ -63,8 +76,27 @@ forma mais rápida de explorar a API.
       themes { code label }
       agencies { code label }
       popularTags(limit: 10) { label count }
+      # contagem de artigos por tema, no nível e janela escolhidos
+      themeArticleCounts(days: 30, level: 1) { code label count }
     }
     ```
+
+=== "Relacionados"
+
+    ```graphql
+    query Relacionados($id: String!) {
+      # similares por theme-code (Typesense), excluindo o próprio artigo
+      relatedArticles(uniqueId: $id, limit: 4) {
+        uniqueId title url mostSpecificThemeLabel
+      }
+    }
+    ```
+
+    !!! tip "`relatedArticles` ≠ `similarArticles`"
+        `relatedArticles` é **público** e similaridade por **theme-code** no
+        Typesense (usa `mostSpecificThemeCode`, senão `theme1Level1Code`). O
+        `similarArticles` é **interno** (`IsInternal`) e baseado em **embeddings
+        no Postgres** — ver [Queries internas](#queries-internas-service-account).
 
 === "Analytics"
 
@@ -115,13 +147,41 @@ Exigem `Authorization: Bearer <JWT do Keycloak>`.
     }
     ```
 
-=== "Estimativa"
+=== "Estimativa (real)"
 
     ```graphql
     query Estimar {
-      clippingEstimate(themes: [], agencies: ["ms"], keywords: ["vacinação"]) {
-        totalEstimate
+      # contagem REAL por recorte nas últimas sinceHours; substitui o mock clippingEstimate
+      estimateRecorteCount(
+        themes: [], agencies: ["ms"], keywords: ["vacinação"], sinceHours: 24
+      )
+    }
+    ```
+
+    !!! note "`estimateRecorteCount` é o caminho atual"
+        Retorna um `Int!` (contagem real no Typesense), não o `{ totalEstimate }`
+        mock do antigo `clippingEstimate`. Para keywords, conta por keyword e
+        devolve o MAX; sem keywords, uma única contagem filtro-only. É **público**.
+
+=== "Listings seguidos"
+
+    ```graphql
+    query MeusSeguidos {
+      # substitui o getFollows do portal; campos do listing + canais de entrega
+      myFollowedListings {
+        id name authorDisplayName followedAt
+        deliveryChannels { email telegram push webhook }
+        extraEmails webhookUrl
       }
+    }
+    ```
+
+=== "Telegram vinculado"
+
+    ```graphql
+    query Telegram {
+      # substitui o getHasTelegram; lê users/{id}/telegramLink/account
+      currentUserHasTelegramLinked
     }
     ```
 
@@ -134,6 +194,37 @@ Exigem `Authorization: Bearer <JWT do Keycloak>`.
 
     mutation Clonar($listingId: String!) {
       cloneMarketplaceListing(listingId: $listingId) { id name }   # retorna o Clipping novo
+    }
+    ```
+
+## Releases (entregas)
+
+Um **release** é uma entrega histórica de um clipping. A autorização é
+**mista**: pública se o listing-fonte estiver ativo (conteúdo já é público),
+senão restrita ao autor ou subscriber — ver [auth › Releases](auth.md#3-autorizacao-mista-releases).
+
+=== "Release por id"
+
+    ```graphql
+    query Release($id: String!) {
+      # busca por id; recortes/marketplaceListingId/digestPreview só são populados aqui
+      release(id: $id) {
+        id clippingName createdAt articlesCount
+        digestPreview              # resumo ≤150 chars, computado
+        marketplaceListingId       # id do listing ativo, ou null
+        recortes { title themes agencies keywords }
+      }
+    }
+    ```
+
+=== "Artigos de um release"
+
+    ```graphql
+    query ArtigosDoRelease($id: String!) {
+      # OR dos recortes (com keywords), dedup por uniqueId; auth espelha release(id)
+      releaseArticles(id: $id) {
+        uniqueId title url publishedAt mostSpecificThemeLabel
+      }
     }
     ```
 
@@ -179,9 +270,12 @@ mutation Features($id: String!, $f: JSON!) { upsertFeatures(uniqueId: $id, featu
     - **CSP do portal** precisa listar a origin deste serviço em `connect-src`,
       senão o browser bloqueia (CORS aqui não basta).
     - **`Agency` é `{ code, label }`** — não `{ key, name, type }`.
-    - **`clippingEstimate` e `sendClipping` são placeholders** (mock) na R1 —
-      `clippingEstimate` recebe `themes/agencies/keywords` (não uma lista de
-      recortes) e retorna `{ totalEstimate }`.
+    - **`estimateRecorteCount` é a estimativa real** (`Int!`) e substitui o mock
+      `clippingEstimate` (que retorna `{ totalEstimate }` e é deprecated). O novo
+      recebe `themes/agencies/keywords/sinceHours`. `sendClipping` segue mock.
+    - **IDs de tema fazem OR entre L1/L2/L3.** `ArticleFilter.themes` casa contra
+      qualquer nível; `relatedArticles`/`releaseArticles` usam `mostSpecificThemeCode`.
+    - **`relatedArticles` (público, theme-code) ≠ `similarArticles` (interno, embeddings).**
     - **`cloneMarketplaceListing` retorna `Clipping!`** (precisa de selection set,
       ex.: `{ id name }`) — era `Boolean!` antes de um gap-fix pré-rollout.
     - **`clippings`** (não `myClippings`) é a query de listagem do usuário.

@@ -50,6 +50,35 @@ async def _batch_load_agencies(keys, typesense_ds):
     # mapeia facet → label e devolve na ordem das keys
 ```
 
+## Capacidades do `TypesenseDatasource`
+
+Além da busca paginada de artigos e das facet queries de labels, o datasource de
+leitura expõe (a partir do desacoplamento BD→GraphQL do portal) as seguintes
+capacidades, todas em cima da coleção `articles`:
+
+- **Dedup / `group_by content_hash`.** Quando o resolver pede `dedup` (em
+  `articles`/`search` via `ArticleFilter.dedup` ou o arg `dedup` da `search`), a
+  query usa `group_by=content_hash` + `group_limit=1`, colapsando variações do
+  mesmo conteúdo (republicações entre órgãos) numa única linha.
+- **Busca híbrida com `alpha` passthrough.** O arg `alpha` da `search` é repassado
+  ao `vector_query` (`embedding:([], alpha: <alpha>)`), controlando o peso do
+  vetor no ranking híbrido (default `0.3`; `0` = keyword puro, `1` = vetor puro).
+  Só tem efeito com `semantic: true`.
+- **`theme_counts(level, days)`.** Uma facet query (`facet_by` no code do nível
+  pedido, `per_page: 0`, filtro `published_at >= now - days`) que devolve a
+  contagem de artigos por tema. Alimenta `themeArticleCounts`.
+- **Busca por keyword (`q` / `query_by`).** Para estimativa/recortes, a busca por
+  termo usa `q=<keyword>` com `query_by=title,summary`; quando o recorte não tem
+  keywords, cai para `q=*` (filtro-only). Alimenta `estimateRecorteCount`,
+  `releaseArticles` e `relatedArticles`.
+
+!!! note "Similaridade: dois caminhos distintos"
+    `relatedArticles` resolve **por theme-code** neste datasource Typesense
+    (`mostSpecificThemeCode`, senão `theme1Level1Code`; exclui o próprio artigo;
+    ordena por `publishedAt` desc; dedup por `content_hash`). É **distinto** do
+    `similarArticles` **interno** (`IsInternal`), que usa **embeddings no
+    Postgres** — backends diferentes, públicos diferentes.
+
 ## Mapeamento camelCase ↔ snake_case
 
 Documentos do Firestore usam `camelCase` (mesma convenção do portal que os
