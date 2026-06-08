@@ -2,7 +2,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from graphql_api.schema.resolvers.search import resolve_search, resolve_search_suggestions
+from graphql_api.schema.resolvers.search import (
+    SearchQuery,
+    resolve_search,
+    resolve_search_suggestions,
+)
 from graphql_api.schema.types.article import ArticleFilter
 
 
@@ -257,3 +261,53 @@ async def test_empty_query_returns_error():
 
     with pytest.raises(ValueError, match="Query must not be empty"):
         await resolve_search(query="   ", typesense_client=ts_client)
+
+
+def _mock_info(typesense_ds):
+    """Mock de strawberry Info com context.typesense_ds."""
+    info = MagicMock()
+    info.context.typesense_ds = typesense_ds
+    return info
+
+
+class TestSearchQueryResolver:
+    async def test_search_uses_context_typesense_client(self):
+        hits = [_make_typesense_hit("art-1", "From Context")]
+        ts_client = _mock_typesense_client(hits, found=1)
+        ds = MagicMock()
+        ds.client = ts_client
+        info = _mock_info(ds)
+
+        result = await SearchQuery().search(info, query="article")
+
+        assert result.found == 1
+        assert result.articles[0].unique_id == "art-1"
+        # Usou o client vindo do contexto
+        ts_client.collections.__getitem__.return_value.documents.search.assert_called()
+
+    async def test_search_returns_empty_when_ds_none(self):
+        info = _mock_info(None)
+
+        result = await SearchQuery().search(info, query="article")
+
+        assert result.found == 0
+        assert result.articles == []
+
+    async def test_search_suggestions_uses_context_typesense_client(self):
+        hits = [_make_typesense_hit("s-1", "Suggestion")]
+        ts_client = _mock_typesense_client(hits)
+        ds = MagicMock()
+        ds.client = ts_client
+        info = _mock_info(ds)
+
+        suggestions = await SearchQuery().search_suggestions(info, query="sug")
+
+        assert len(suggestions) == 1
+        assert suggestions[0].unique_id == "s-1"
+
+    async def test_search_suggestions_returns_empty_when_ds_none(self):
+        info = _mock_info(None)
+
+        suggestions = await SearchQuery().search_suggestions(info, query="sug")
+
+        assert suggestions == []

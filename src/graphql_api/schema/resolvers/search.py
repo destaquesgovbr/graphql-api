@@ -1,6 +1,7 @@
 from typing import Optional
 
 import strawberry
+from strawberry.types import Info
 
 from graphql_api.datasources.embeddings import EmbeddingsDatasource
 from graphql_api.schema.types.article import Article, ArticleFilter, ArticlesResult
@@ -157,6 +158,7 @@ class SearchQuery:
     @strawberry.field(description="Search articles with keyword or semantic search")
     async def search(
         self,
+        info: Info,
         query: str,
         filter: Optional[ArticleFilter] = None,
         page: int = 1,
@@ -164,9 +166,10 @@ class SearchQuery:
         alpha: Optional[float] = None,
         dedup: bool = False,
     ) -> ArticlesResult:
-        from graphql_api.datasources.typesense import TypesenseDatasource
+        ds = info.context.typesense_ds
+        if ds is None:
+            return ArticlesResult(articles=[], page=page, found=0)
 
-        ts = TypesenseDatasource()
         embeddings_ds = EmbeddingsDatasource() if semantic else None
         return await resolve_search(
             query=query,
@@ -175,16 +178,17 @@ class SearchQuery:
             semantic=semantic,
             alpha=alpha,
             dedup=dedup,
-            typesense_client=ts.client,
+            typesense_client=ds.client,
             embeddings_ds=embeddings_ds,
         )
 
     @strawberry.field(description="Get search suggestions for autocomplete")
-    async def search_suggestions(self, query: str) -> list[SearchSuggestion]:
-        from graphql_api.datasources.typesense import TypesenseDatasource
+    async def search_suggestions(self, info: Info, query: str) -> list[SearchSuggestion]:
+        ds = info.context.typesense_ds
+        if ds is None:
+            return []
 
-        ts = TypesenseDatasource()
         return await resolve_search_suggestions(
             query=query,
-            typesense_client=ts.client,
+            typesense_client=ds.client,
         )
