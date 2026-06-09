@@ -213,3 +213,53 @@ async def test_articles_pagination(client, mock_typesense_ds):
     assert result["page"] == 2
     assert result["found"] == 15
     assert len(result["articles"]) == 5
+
+
+def _mock_info(ds):
+    info = MagicMock()
+    info.context.typesense_ds = ds
+    return info
+
+
+class TestArticlesSortAndFilters:
+    """Fiação do resolver ArticleQuery.articles para `sort` (Fase 2) e os novos
+    filtros entities/sentiment — encaminhamento correto ao search_articles."""
+
+    def test_sort_views_maps_to_view_count_desc(self):
+        from graphql_api.schema.resolvers.articles import ArticleQuery
+        from graphql_api.schema.types.article import ArticleSort
+
+        ds = _make_mock_ds()
+        ArticleQuery().articles(_mock_info(ds), sort=ArticleSort.VIEWS)
+        assert ds.search_articles.call_args.kwargs["sort_by"] == "view_count:desc"
+
+    def test_sort_trending_maps_to_trending_desc(self):
+        from graphql_api.schema.resolvers.articles import ArticleQuery
+        from graphql_api.schema.types.article import ArticleSort
+
+        ds = _make_mock_ds()
+        ArticleQuery().articles(_mock_info(ds), sort=ArticleSort.TRENDING)
+        assert ds.search_articles.call_args.kwargs["sort_by"] == "trending_score:desc"
+
+    def test_sort_none_defaults_to_published_desc(self):
+        # Listagem (sem query): None cai para data desc (distinto do None da busca).
+        from graphql_api.schema.resolvers.articles import ArticleQuery
+
+        ds = _make_mock_ds()
+        ArticleQuery().articles(_mock_info(ds))
+        assert ds.search_articles.call_args.kwargs["sort_by"] == "published_at:desc"
+
+    def test_entities_and_sentiment_forwarded_from_filter(self):
+        from graphql_api.schema.resolvers.articles import ArticleQuery
+        from graphql_api.schema.types.article import ArticleFilter
+
+        ds = _make_mock_ds()
+        ArticleQuery().articles(
+            _mock_info(ds),
+            filter=ArticleFilter(
+                entities=["Ministério da Saúde"], sentiment=["positive"]
+            ),
+        )
+        kwargs = ds.search_articles.call_args.kwargs
+        assert kwargs["entities"] == ["Ministério da Saúde"]
+        assert kwargs["sentiment"] == ["positive"]

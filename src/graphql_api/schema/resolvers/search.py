@@ -6,7 +6,12 @@ from strawberry.types import Info
 from graphql_api.datasources.embeddings import EmbeddingsDatasource
 from graphql_api.datasources.typesense import COLLECTION_NAME, TypesenseDatasource
 from graphql_api.schema.resolvers.articles import _to_graphql_article
-from graphql_api.schema.types.article import ArticleFilter, ArticlesResult
+from graphql_api.schema.types.article import (
+    ArticleFilter,
+    ArticleSort,
+    ArticlesResult,
+    sort_by_clause,
+)
 from graphql_api.schema.types.search import SearchSuggestion
 
 
@@ -19,6 +24,7 @@ async def resolve_search(
     dedup: bool = False,
     ds: TypesenseDatasource = None,
     embeddings_ds: Optional[EmbeddingsDatasource] = None,
+    sort_by: Optional[str] = None,
 ) -> ArticlesResult:
     """Busca artigos (keyword ou semântica), roteando pelo datasource.
 
@@ -54,8 +60,10 @@ async def resolve_search(
         tags=filter.tags if filter else None,
         start_date=filter.start_date if filter else None,
         end_date=filter.end_date if filter else None,
+        entities=filter.entities if filter else None,
+        sentiment=filter.sentiment if filter else None,
         dedup=dedup,
-        sort_by=None,
+        sort_by=sort_by,
         vector=vector,
         alpha=effective_alpha,
     )
@@ -106,6 +114,7 @@ class SearchQuery:
         semantic: bool = False,
         alpha: Optional[float] = None,
         dedup: bool = False,
+        sort: Optional[ArticleSort] = None,
     ) -> ArticlesResult:
         ds = info.context.typesense_ds
         if ds is None:
@@ -121,6 +130,9 @@ class SearchQuery:
             dedup=dedup,
             ds=ds,
             embeddings_ds=embeddings_ds,
+            # Busca por keyword: None/RELEVANCE preservam a relevância de
+            # text-match (sort_by=None); DATE/TRENDING/VIEWS sobrescrevem.
+            sort_by=sort_by_clause(sort, relevance_default=True),
         )
 
     @strawberry.field(description="Get search suggestions for autocomplete")

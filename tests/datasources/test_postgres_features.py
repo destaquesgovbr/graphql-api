@@ -85,3 +85,61 @@ class TestBatchUpsertFeatures:
         assert processed == 0
         assert failed == 0
         conn.execute.assert_not_awaited()
+
+
+def _make_fetch_pool(rows):
+    """Pool mock com `conn.fetch` retornando `rows` (lista de dicts)."""
+    pool = MagicMock()
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=rows)
+    acq = AsyncMock()
+    acq.__aenter__ = AsyncMock(return_value=conn)
+    acq.__aexit__ = AsyncMock(return_value=False)
+    pool.acquire = MagicMock(return_value=acq)
+    return pool, conn
+
+
+class TestGetFeaturesBatch:
+    @pytest.mark.asyncio
+    async def test_returns_features_keyed_by_unique_id(self):
+        rows = [
+            {
+                "unique_id": "a",
+                "features": {
+                    "word_count": 100,
+                    "entities": [{"text": "X", "type": "ORG", "count": 2}],
+                },
+            },
+            {"unique_id": "b", "features": {"trending_score": 1.5}},
+        ]
+        pool, conn = _make_fetch_pool(rows)
+        ds = PostgresDatasource(pool)
+
+        result = await ds.get_features_batch(["a", "b", "c"])
+
+        assert result["a"]["word_count"] == 100
+        assert result["a"]["entities"][0]["text"] == "X"
+        assert result["b"]["trending_score"] == 1.5
+        assert "c" not in result  # ausente em news_features
+        conn.fetch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_jsonb_string_is_parsed(self):
+        # asyncpg devolve jsonb como str (sem codec) — deve ser desserializado.
+        rows = [{"unique_id": "a", "features": '{"word_count": 5}'}]
+        pool, _ = _make_fetch_pool(rows)
+        ds = PostgresDatasource(pool)
+
+        result = await ds.get_features_batch(["a"])
+
+        assert result["a"]["word_count"] == 5
+
+    @pytest.mark.asyncio
+    async def test_empty_ids_returns_empty_no_query(self):
+        pool, conn = _make_fetch_pool([])
+        ds = PostgresDatasource(pool)
+
+        result = await ds.get_features_batch([])
+
+        assert result == {}
+        conn.fetch.assert_not_awaited()

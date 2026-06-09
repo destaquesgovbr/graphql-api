@@ -50,6 +50,45 @@ def test_article_filter_exposes_theme_label_and_dedup():
     assert "themeLabel" in sdl
 
 
+def test_article_exposes_features_field():
+    from graphql_api.schema import schema
+
+    sdl = schema.as_str()
+    # Campo lazy de features no Article (aditivo, drift-safe).
+    assert "features: ArticleFeatures" in sdl
+    assert "type ArticleFeatures {" in sdl
+    assert "type EntityType {" in sdl
+    entity_block = sdl.split("type EntityType {", 1)[1].split("}", 1)[0]
+    assert "text: String!" in entity_block
+    assert "type: String!" in entity_block
+    assert "count: Int!" in entity_block
+    feats_block = sdl.split("type ArticleFeatures {", 1)[1].split("}", 1)[0]
+    assert "entities: [EntityType!]!" in feats_block
+    assert "trendingScore: Float" in feats_block
+    assert "viewCount: Int" in feats_block
+    assert "wordCount: Int" in feats_block
+
+
+def test_article_filter_exposes_entities_and_sentiment():
+    from graphql_api.schema import schema
+
+    afilter = schema.schema_converter.type_map["ArticleFilter"].definition
+    field_names = {f.name for f in afilter.fields}
+    assert "entities" in field_names
+    assert "sentiment" in field_names
+
+
+def test_article_sort_enum_and_search_sort_arg():
+    from graphql_api.schema import schema
+
+    sdl = schema.as_str()
+    assert "enum ArticleSort {" in sdl
+    for value in ("RELEVANCE", "DATE", "TRENDING", "VIEWS"):
+        assert value in sdl, f"valor {value} ausente em ArticleSort"
+    # Os resolvers de listagem/busca aceitam o argumento `sort`.
+    assert "sort: ArticleSort" in sdl
+
+
 @pytest.mark.asyncio
 async def test_invalid_query_returns_error(client):
     response = await client.post("/graphql", json={

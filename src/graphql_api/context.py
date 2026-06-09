@@ -75,6 +75,9 @@ class GraphQLContext(BaseContext):
         self.subscription_loader: Optional[Any] = None
         # Fase A5: dataloader de releases (batch por clipping_id).
         self.releases_loader: Optional[Any] = None
+        # Fase 1 (features): dataloader de features por unique_id (batch Postgres),
+        # usado pelo campo lazy `Article.features`.
+        self.features_loader: Optional[Any] = None
         if firestore_ds is not None:
             # Import local para evitar ciclo (dataloaders importa firestore).
             from graphql_api.dataloaders import (
@@ -84,6 +87,10 @@ class GraphQLContext(BaseContext):
 
             self.subscription_loader = create_subscription_loader(firestore_ds)
             self.releases_loader = create_releases_loader(firestore_ds)
+        if postgres_ds is not None:
+            from graphql_api.dataloaders import create_features_loader
+
+            self.features_loader = create_features_loader(postgres_ds)
 
     @property
     def is_authenticated(self) -> bool:

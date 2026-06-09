@@ -66,6 +66,22 @@ def create_agency_loader(typesense_ds: Any) -> DataLoader:
 # ---------------------------------------------------------------------------
 # Subscription dataloader (Fase A3)
 # ---------------------------------------------------------------------------
+def create_features_loader(postgres_ds: Any) -> DataLoader:
+    """DataLoader para `Article.features` (Fase 1).
+
+    Batch por `unique_id`: uma única query a `news_features` por request, mesmo
+    quando a tela renderiza o artigo + cards relacionados todos pedindo
+    `features`. Retorna o dict de features (ou None) por key, alinhado por
+    posição.
+    """
+
+    async def load_fn(keys: list[str]) -> list[Optional[dict]]:
+        by_id = await postgres_ds.get_features_batch(list(keys))
+        return [by_id.get(k) for k in keys]
+
+    return DataLoader(load_fn=load_fn)
+
+
 def create_subscription_loader(firestore_ds: Any) -> DataLoader:
     """DataLoader para `Clipping.mySubscription`.
 

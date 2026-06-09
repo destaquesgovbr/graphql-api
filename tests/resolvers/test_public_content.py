@@ -6,12 +6,14 @@ Cobre `relatedArticles`, `themeArticleCounts`, `releaseArticles` e
 """
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 import strawberry
 
 from graphql_api.context import GraphQLContext, User
 from graphql_api.datasources.firestore import ClippingData, ReleaseData, SubscriptionData
+from graphql_api.datasources.postgres import SimilarArticleRecord
 from graphql_api.datasources.typesense import ArticleDocument, SearchResult
 from graphql_api.schema.resolvers.health import HealthQuery
 from graphql_api.schema.resolvers.public_content import PublicContentQuery
@@ -38,8 +40,14 @@ def _doc(unique_id: str, published_at: datetime = NOW, **overrides) -> ArticleDo
     return ArticleDocument(**defaults)
 
 
-def _ctx(typesense_ds=None, firestore_ds=None, user_id=None) -> GraphQLContext:
-    ctx = GraphQLContext(typesense_ds=typesense_ds, firestore_ds=firestore_ds)
+def _ctx(
+    typesense_ds=None, firestore_ds=None, postgres_ds=None, user_id=None
+) -> GraphQLContext:
+    ctx = GraphQLContext(
+        typesense_ds=typesense_ds,
+        firestore_ds=firestore_ds,
+        postgres_ds=postgres_ds,
+    )
     if user_id is not None:
         ctx.user = User(id=user_id, email="test@example.com")
     return ctx
@@ -61,91 +69,103 @@ RELATED_QUERY = """
 
 
 class TestRelatedArticles:
-    def test_uses_most_specific_theme_code_and_excludes_self(self):
-        ds = MagicMock()
-        ds.get_article_by_id.return_value = _doc(
-            "base",
-            most_specific_theme_code="saude.vacina",
-            theme_1_level_1_code="saude",
+    """relatedArticles agora é por similaridade semântica (embedding pgvector):
+    PostgresDatasource.get_similar_articles → hidratação via
+    TypesenseDatasource.get_articles_by_ids, preservando a ordem de similaridade.
+    """
+
+    @pytest.mark.asyncio
+    async def test_semantic_order_preserved_and_hydrated(self):
+        pg = MagicMock()
+        pg.get_similar_articles = AsyncMock(
+            return_value=[
+                SimilarArticleRecord("a", 0.92),
+                SimilarArticleRecord("b", 0.81),
+                SimilarArticleRecord("c", 0.73),
+            ]
         )
-        ds.search_articles.return_value = SearchResult(
-            articles=[
-                _doc("base"),  # o proprio artigo -> deve ser excluido
-                _doc("a", most_specific_theme_code="saude.vacina"),
-                _doc("b"),
-            ],
-            page=1,
-            found=3,
-        )
-        result = test_schema.execute_sync(
+        ts = MagicMock()
+        ts.get_articles_by_ids.return_value = {
+            "a": _doc("a"),
+            "b": _doc("b"),
+            "c": _doc("c"),
+        }
+        result = await test_schema.execute(
             RELATED_QUERY,
             variable_values={"id": "base", "limit": 4},
-            context_value=_ctx(typesense_ds=ds),
+            context_value=_ctx(typesense_ds=ts, postgres_ds=pg),
         )
         assert result.errors is None, f"Errors: {result.errors}"
         ids = [a["uniqueId"] for a in result.data["relatedArticles"]]
-        assert "base" not in ids
-        assert ids == ["a", "b"]
-        # most_specific_theme_code foi usado (nao o L1)
-        _, kwargs = ds.search_articles.call_args
-        assert kwargs["themes"] == ["saude.vacina"]
-        assert kwargs["dedup"] is True
+        assert ids == ["a", "b", "c"]
+        pg.get_similar_articles.assert_awaited_once()
+        # over-fetch: pede mais que `limit` p/ compensar ids ausentes no índice
+        assert pg.get_similar_articles.await_args.kwargs["limit"] >= 4
 
-    def test_falls_back_to_level_1_when_no_most_specific(self):
-        ds = MagicMock()
-        ds.get_article_by_id.return_value = _doc(
-            "base",
-            most_specific_theme_code=None,
-            theme_1_level_1_code="economia",
+    @pytest.mark.asyncio
+    async def test_skips_ids_missing_in_typesense(self):
+        pg = MagicMock()
+        pg.get_similar_articles = AsyncMock(
+            return_value=[
+                SimilarArticleRecord("a", 0.9),
+                SimilarArticleRecord("b", 0.8),
+                SimilarArticleRecord("c", 0.7),
+            ]
         )
-        ds.search_articles.return_value = SearchResult(
-            articles=[_doc("x")], page=1, found=1
-        )
-        result = test_schema.execute_sync(
+        ts = MagicMock()
+        # "b" não está indexado no Typesense → omitido do resultado
+        ts.get_articles_by_ids.return_value = {"a": _doc("a"), "c": _doc("c")}
+        result = await test_schema.execute(
             RELATED_QUERY,
             variable_values={"id": "base", "limit": 4},
-            context_value=_ctx(typesense_ds=ds),
+            context_value=_ctx(typesense_ds=ts, postgres_ds=pg),
         )
         assert result.errors is None, f"Errors: {result.errors}"
-        _, kwargs = ds.search_articles.call_args
-        assert kwargs["themes"] == ["economia"]
+        ids = [a["uniqueId"] for a in result.data["relatedArticles"]]
+        assert ids == ["a", "c"]
 
-    def test_respects_limit_after_excluding_self(self):
-        ds = MagicMock()
-        ds.get_article_by_id.return_value = _doc("base", theme_1_level_1_code="t")
-        ds.search_articles.return_value = SearchResult(
-            articles=[_doc(c) for c in ("base", "a", "b", "c", "d")],
-            page=1,
-            found=5,
+    @pytest.mark.asyncio
+    async def test_respects_limit(self):
+        pg = MagicMock()
+        pg.get_similar_articles = AsyncMock(
+            return_value=[
+                SimilarArticleRecord(c, 0.9 - i * 0.05)
+                for i, c in enumerate(["a", "b", "c", "d", "e"])
+            ]
         )
-        result = test_schema.execute_sync(
+        ts = MagicMock()
+        ts.get_articles_by_ids.return_value = {
+            c: _doc(c) for c in ["a", "b", "c", "d", "e"]
+        }
+        result = await test_schema.execute(
             RELATED_QUERY,
             variable_values={"id": "base", "limit": 2},
-            context_value=_ctx(typesense_ds=ds),
+            context_value=_ctx(typesense_ds=ts, postgres_ds=pg),
         )
         assert result.errors is None, f"Errors: {result.errors}"
         ids = [a["uniqueId"] for a in result.data["relatedArticles"]]
         assert ids == ["a", "b"]
 
-    def test_missing_base_article_returns_empty(self):
-        ds = MagicMock()
-        ds.get_article_by_id.return_value = None
-        result = test_schema.execute_sync(
+    @pytest.mark.asyncio
+    async def test_no_similar_returns_empty(self):
+        pg = MagicMock()
+        pg.get_similar_articles = AsyncMock(return_value=[])
+        ts = MagicMock()
+        result = await test_schema.execute(
             RELATED_QUERY,
-            variable_values={"id": "missing", "limit": 4},
-            context_value=_ctx(typesense_ds=ds),
+            variable_values={"id": "base", "limit": 4},
+            context_value=_ctx(typesense_ds=ts, postgres_ds=pg),
         )
         assert result.errors is None, f"Errors: {result.errors}"
         assert result.data["relatedArticles"] == []
-        ds.search_articles.assert_not_called()
+        ts.get_articles_by_ids.assert_not_called()
 
-    def test_no_theme_code_returns_empty(self):
-        ds = MagicMock()
-        ds.get_article_by_id.return_value = _doc("base")  # sem nenhum theme code
-        result = test_schema.execute_sync(
+    @pytest.mark.asyncio
+    async def test_no_datasources_returns_empty(self):
+        result = await test_schema.execute(
             RELATED_QUERY,
             variable_values={"id": "base", "limit": 4},
-            context_value=_ctx(typesense_ds=ds),
+            context_value=_ctx(),  # sem typesense_ds / postgres_ds
         )
         assert result.errors is None, f"Errors: {result.errors}"
         assert result.data["relatedArticles"] == []
@@ -559,3 +579,53 @@ class TestSDL:
             "estimateRecorteCount(themes: [String!]!, agencies: [String!]!, "
             "keywords: [String!]!, sinceHours: Int! = 24): Int!" in sdl
         )
+
+    def test_entity_facet_type_and_suggestions_signature(self):
+        sdl = test_schema.as_str()
+        assert "type EntityFacet {" in sdl
+        block = sdl.split("type EntityFacet {", 1)[1].split("}", 1)[0]
+        assert "value: String!" in block
+        assert "count: Int!" in block
+        assert "entitySuggestions(" in sdl
+
+
+# ---------------------------------------------------------------------------
+# entitySuggestions
+# ---------------------------------------------------------------------------
+ENTITY_SUGGESTIONS_QUERY = """
+    query($q: String!, $t: String, $limit: Int!) {
+        entitySuggestions(query: $q, type: $t, limit: $limit) {
+            value
+            count
+        }
+    }
+"""
+
+
+class TestEntitySuggestions:
+    def test_maps_facets_to_entity_facet(self):
+        ds = MagicMock()
+        ds.entity_facets.return_value = [
+            ("Ministério da Saúde", 12),
+            ("Brasília", 5),
+        ]
+        result = test_schema.execute_sync(
+            ENTITY_SUGGESTIONS_QUERY,
+            variable_values={"q": "min", "t": "ORG", "limit": 10},
+            context_value=_ctx(typesense_ds=ds),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["entitySuggestions"] == [
+            {"value": "Ministério da Saúde", "count": 12},
+            {"value": "Brasília", "count": 5},
+        ]
+        ds.entity_facets.assert_called_once_with(query="min", entity_type="ORG", limit=10)
+
+    def test_empty_when_no_datasource(self):
+        result = test_schema.execute_sync(
+            ENTITY_SUGGESTIONS_QUERY,
+            variable_values={"q": "min", "t": None, "limit": 10},
+            context_value=_ctx(),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["entitySuggestions"] == []

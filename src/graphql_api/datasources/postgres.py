@@ -84,6 +84,12 @@ ON CONFLICT (unique_id) DO UPDATE SET
   updated_at = NOW()
 """
 
+_FEATURES_BATCH_SQL = """
+SELECT unique_id, features
+FROM news_features
+WHERE unique_id = ANY($1)
+"""
+
 _NEWS_BASE_SQL = """
 SELECT n.*,
   t1.code as theme_l1_code, t1.label as theme_l1_label,
@@ -115,14 +121,19 @@ LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
 WHERE n.published_at BETWEEN $1 AND $2
 """
 
+# Vizinhos mais próximos por cosine via índice HNSW (vector_cosine_ops). O
+# embedding do artigo base é passado como literal `$1::vector` (não como
+# referência a coluna de outra linha) — só assim o planner usa o índice
+# `idx_news_content_embedding_hnsw`; comparar com `n1.content_embedding` (linha
+# juntada) força Seq Scan em ~333k linhas (~4s). O threshold é aplicado em
+# Python sobre o resultado nearest-first.
 _SIMILAR_ARTICLES_SQL = """
-SELECT n2.unique_id,
-  1 - (n1.content_embedding <=> n2.content_embedding) AS similarity
-FROM news n1, news n2
-WHERE n1.unique_id = $1
-  AND n2.unique_id != $1
-  AND 1 - (n1.content_embedding <=> n2.content_embedding) > $2
-ORDER BY similarity DESC
+SELECT unique_id,
+  1 - (content_embedding <=> $1::vector) AS similarity
+FROM news
+WHERE unique_id != $2
+  AND content_embedding IS NOT NULL
+ORDER BY content_embedding <=> $1::vector
 LIMIT $3
 """
 
@@ -353,6 +364,26 @@ class PostgresDatasource:
             rows = await conn.fetch(query, unique_ids)
         return [_row_to_news_record(dict(r)) for r in rows]
 
+    async def get_features_batch(self, unique_ids: list[str]) -> dict[str, dict]:
+        """Carrega `news_features.features` para vários `unique_id` numa query.
+
+        Retorna `{unique_id: features_dict}` apenas para os ids presentes em
+        `news_features`. asyncpg devolve JSONB como str (sem codec de tipo),
+        por isso desserializamos defensivamente.
+        """
+        if not unique_ids:
+            return {}
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(_FEATURES_BATCH_SQL, unique_ids)
+        result: dict[str, dict] = {}
+        for r in rows:
+            row = dict(r)
+            feats = row.get("features")
+            if isinstance(feats, str):
+                feats = json.loads(feats)
+            result[row["unique_id"]] = feats or {}
+        return result
+
     async def get_news_for_typesense(self, unique_id: str) -> Optional[TypesenseDocRecord]:
         query = _NEWS_TYPESENSE_SQL + " WHERE n.unique_id = $1"
         async with self._pool.acquire() as conn:
@@ -385,15 +416,20 @@ class PostgresDatasource:
         limit: int = 5,
     ) -> list[SimilarArticleRecord]:
         async with self._pool.acquire() as conn:
-            # Check if the source article has an embedding
-            has_embedding = await conn.fetchval(
-                "SELECT content_embedding IS NOT NULL FROM news WHERE unique_id = $1",
+            # Embedding do artigo base (lookup indexado por unique_id), lido como
+            # texto pgvector ('[...]'); reusado como literal `$1::vector` para
+            # que o ORDER BY use o índice HNSW. None = artigo sem embedding.
+            embedding = await conn.fetchval(
+                "SELECT content_embedding::text FROM news WHERE unique_id = $1",
                 unique_id,
             )
-            if not has_embedding:
+            if embedding is None:
                 return []
-            rows = await conn.fetch(_SIMILAR_ARTICLES_SQL, unique_id, threshold, limit)
-        return [_row_to_similar_article(dict(r)) for r in rows]
+            rows = await conn.fetch(_SIMILAR_ARTICLES_SQL, embedding, unique_id, limit)
+        records = [_row_to_similar_article(dict(r)) for r in rows]
+        # Threshold em Python: o resultado já vem nearest-first (HNSW), então
+        # cortar abaixo do threshold preserva o contrato (top-N acima do limiar).
+        return [r for r in records if r.similarity > threshold]
 
     async def get_integrity_batch(
         self, batch_size: int = 50
