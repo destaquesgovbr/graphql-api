@@ -386,3 +386,154 @@ class TestGetArticleById:
         article = ds.get_article_by_id("nonexistent")
 
         assert article is None
+
+
+class TestGetArticlesByIds:
+    def test_returns_dict_keyed_by_unique_id(self):
+        d1 = _sample_doc(unique_id="a", title="A")
+        d2 = _sample_doc(unique_id="b", title="B")
+        client = _mock_client(
+            search_return={"hits": [_make_hit(d1), _make_hit(d2)], "found": 2}
+        )
+        ds = TypesenseDatasource(client)
+
+        result = ds.get_articles_by_ids(["a", "b"])
+
+        assert set(result.keys()) == {"a", "b"}
+        assert result["a"].title == "A"
+        assert result["b"].title == "B"
+        # Usa busca com filtro IN (compatível com a search-only key).
+        params = client.collections["news"].documents.search.call_args[0][0]
+        assert "unique_id:[" in params["filter_by"]
+        assert "`a`" in params["filter_by"]
+        assert "`b`" in params["filter_by"]
+
+    def test_empty_ids_returns_empty_no_search(self):
+        client = _mock_client(search_return={"hits": [], "found": 0})
+        ds = TypesenseDatasource(client)
+
+        result = ds.get_articles_by_ids([])
+
+        assert result == {}
+        assert not client.collections["news"].documents.search.called
+
+    def test_missing_ids_simply_absent_from_dict(self):
+        d1 = _sample_doc(unique_id="a", title="A")
+        client = _mock_client(search_return={"hits": [_make_hit(d1)], "found": 1})
+        ds = TypesenseDatasource(client)
+
+        result = ds.get_articles_by_ids(["a", "ghost"])
+
+        assert "a" in result
+        assert "ghost" not in result
+
+
+class TestEntitySentimentFilters:
+    def test_filters_by_entities(self):
+        client = _mock_client(search_return={"hits": [], "found": 0})
+        ds = TypesenseDatasource(client)
+
+        ds.search_articles(entities=["Ministério da Saúde", "Brasília"])
+
+        fb = client.collections["news"].documents.search.call_args[0][0]["filter_by"]
+        assert "entities:[" in fb
+        assert "Ministério da Saúde" in fb
+        assert "Brasília" in fb
+
+    def test_filters_by_sentiment(self):
+        client = _mock_client(search_return={"hits": [], "found": 0})
+        ds = TypesenseDatasource(client)
+
+        ds.search_articles(sentiment=["positive", "neutral"])
+
+        fb = client.collections["news"].documents.search.call_args[0][0]["filter_by"]
+        assert "sentiment_label:[" in fb
+        assert "positive" in fb
+        assert "neutral" in fb
+
+    def test_entity_values_are_backtick_quoted(self):
+        # Crases são load-bearing: sem elas valores multi-palavra quebram a
+        # sintaxe do filter_by do Typesense.
+        client = _mock_client(search_return={"hits": [], "found": 0})
+        ds = TypesenseDatasource(client)
+
+        ds.search_articles(entities=["Ministério da Saúde"])
+
+        fb = client.collections["news"].documents.search.call_args[0][0]["filter_by"]
+        assert "entities:[`Ministério da Saúde`]" in fb
+
+    def test_entities_sentiment_combine_with_and(self):
+        client = _mock_client(search_return={"hits": [], "found": 0})
+        ds = TypesenseDatasource(client)
+
+        ds.search_articles(
+            agencies=["mec"], entities=["Brasília"], sentiment=["positive"]
+        )
+
+        fb = client.collections["news"].documents.search.call_args[0][0]["filter_by"]
+        assert " && " in fb
+        assert "entities:[`Brasília`]" in fb
+        assert "sentiment_label:[`positive`]" in fb
+
+
+class TestEntityFacets:
+    def test_default_field_and_facet_query(self):
+        client = _mock_client(
+            search_return={
+                "facet_counts": [
+                    {
+                        "field_name": "entities",
+                        "counts": [
+                            {"value": "Ministério da Saúde", "count": 12},
+                            {"value": "Brasília", "count": 5},
+                        ],
+                    }
+                ]
+            }
+        )
+        ds = TypesenseDatasource(client)
+
+        result = ds.entity_facets(query="min", limit=10)
+
+        assert result == [("Ministério da Saúde", 12), ("Brasília", 5)]
+        params = client.collections["news"].documents.search.call_args[0][0]
+        assert params["facet_by"] == "entities"
+        assert params["facet_query"] == "entities:min"
+        assert params["max_facet_values"] == 10
+        assert params["per_page"] == 0
+
+    def test_typed_field_org(self):
+        client = _mock_client(search_return={"facet_counts": []})
+        ds = TypesenseDatasource(client)
+
+        ds.entity_facets(query="", entity_type="ORG", limit=5)
+
+        params = client.collections["news"].documents.search.call_args[0][0]
+        assert params["facet_by"] == "entity_org"
+        # query vazia → sem facet_query (lista os top facets)
+        assert "facet_query" not in params
+
+    def test_unknown_type_falls_back_to_combined(self):
+        client = _mock_client(search_return={"facet_counts": []})
+        ds = TypesenseDatasource(client)
+
+        ds.entity_facets(query="x", entity_type="WHATEVER", limit=5)
+
+        params = client.collections["news"].documents.search.call_args[0][0]
+        assert params["facet_by"] == "entities"
+
+    def test_typed_fields_per_and_loc(self):
+        for entity_type, field in (("PER", "entity_per"), ("LOC", "entity_loc")):
+            client = _mock_client(search_return={"facet_counts": []})
+            ds = TypesenseDatasource(client)
+            ds.entity_facets(query="", entity_type=entity_type, limit=5)
+            params = client.collections["news"].documents.search.call_args[0][0]
+            assert params["facet_by"] == field
+
+    def test_entity_type_is_uppercased(self):
+        # Cliente pode mandar "org" minúsculo; o datasource normaliza com .upper().
+        client = _mock_client(search_return={"facet_counts": []})
+        ds = TypesenseDatasource(client)
+        ds.entity_facets(query="", entity_type="org", limit=5)
+        params = client.collections["news"].documents.search.call_args[0][0]
+        assert params["facet_by"] == "entity_org"

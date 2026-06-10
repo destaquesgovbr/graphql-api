@@ -4,7 +4,13 @@ import strawberry
 from strawberry.types import Info
 
 from graphql_api.datasources.typesense import ArticleDocument
-from graphql_api.schema.types.article import Article, ArticleFilter, ArticlesResult
+from graphql_api.schema.types.article import (
+    Article,
+    ArticleFilter,
+    ArticleSort,
+    ArticlesResult,
+    sort_by_clause,
+)
 
 
 def _to_graphql_article(doc: ArticleDocument) -> Article:
@@ -37,13 +43,14 @@ def _to_graphql_article(doc: ArticleDocument) -> Article:
 
 @strawberry.type
 class ArticleQuery:
-    @strawberry.field(description="Lista artigos com filtros e paginação")
+    @strawberry.field(description="Lista artigos com filtros, paginação e ordenação")
     def articles(
         self,
         info: Info,
         page: int = 1,
         limit: int = 10,
         filter: Optional[ArticleFilter] = None,
+        sort: Optional[ArticleSort] = None,
     ) -> ArticlesResult:
         ctx = info.context
         ds = ctx.typesense_ds
@@ -57,7 +64,11 @@ class ArticleQuery:
             start_date=filter.start_date if filter else None,
             end_date=filter.end_date if filter else None,
             theme_label=filter.theme_label if filter else None,
+            entities=filter.entities if filter else None,
+            sentiment=filter.sentiment if filter else None,
             dedup=bool(filter.dedup) if filter else False,
+            # Listagem sem query: None/RELEVANCE caem para data desc.
+            sort_by=sort_by_clause(sort, relevance_default=False),
         )
 
         return ArticlesResult(

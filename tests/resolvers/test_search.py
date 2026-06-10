@@ -343,3 +343,32 @@ class TestSearchQueryResolver:
         suggestions = await SearchQuery().search_suggestions(info, query="sug")
 
         assert suggestions == []
+
+
+async def test_search_passes_entities_and_sentiment_filter():
+    ds = _mock_ds([_make_article_doc("a", "A")])
+
+    filter_input = ArticleFilter(entities=["Ministério da Saúde"], sentiment=["positive"])
+    await resolve_search(query="saude", filter=filter_input, ds=ds)
+
+    kwargs = ds.search_articles.call_args.kwargs
+    assert kwargs["entities"] == ["Ministério da Saúde"]
+    assert kwargs["sentiment"] == ["positive"]
+
+
+async def test_search_sort_by_overrides_relevance():
+    ds = _mock_ds([_make_article_doc("a", "A")])
+
+    await resolve_search(query="x", ds=ds, sort_by="trending_score:desc")
+
+    kwargs = ds.search_articles.call_args.kwargs
+    assert kwargs["sort_by"] == "trending_score:desc"
+
+
+async def test_search_sort_by_defaults_to_none_relevance():
+    ds = _mock_ds([_make_article_doc("a", "A")])
+
+    await resolve_search(query="x", ds=ds)
+
+    kwargs = ds.search_articles.call_args.kwargs
+    assert kwargs["sort_by"] is None

@@ -30,7 +30,11 @@ class TestGetSimilarArticles:
             {"unique_id": "news-003", "similarity": 0.88},
             {"unique_id": "news-004", "similarity": 0.82},
         ]
-        pool, conn = _make_mock_pool(fetchval_result=True, fetch_result=similar_rows)
+        # fetchval devolve o embedding do artigo base (texto pgvector), reusado
+        # como literal `$1::vector` na busca por vizinhos (HNSW).
+        pool, conn = _make_mock_pool(
+            fetchval_result="[0.1, 0.2, 0.3]", fetch_result=similar_rows
+        )
         ds = PostgresDatasource(pool)
 
         result = await ds.get_similar_articles("news-001", threshold=0.8, limit=5)
@@ -46,12 +50,30 @@ class TestGetSimilarArticles:
 
     @pytest.mark.asyncio
     async def test_similar_articles_no_embedding_returns_empty(self):
-        pool, conn = _make_mock_pool(fetchval_result=False, fetch_result=[])
+        # Sem embedding → fetchval devolve None (content_embedding::text IS NULL).
+        pool, conn = _make_mock_pool(fetchval_result=None, fetch_result=[])
         ds = PostgresDatasource(pool)
 
         result = await ds.get_similar_articles("news-no-embed")
 
         assert result == []
         conn.fetchval.assert_awaited_once()
-        # Should not call fetch since there's no embedding
+        # Não deve buscar vizinhos se o artigo base não tem embedding.
         conn.fetch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_threshold_filters_below_in_python(self):
+        # O SQL devolve nearest-first; o threshold corta os abaixo do limiar.
+        similar_rows = [
+            {"unique_id": "near", "similarity": 0.95},
+            {"unique_id": "mid", "similarity": 0.70},
+            {"unique_id": "far", "similarity": 0.50},
+        ]
+        pool, _ = _make_mock_pool(
+            fetchval_result="[0.1, 0.2, 0.3]", fetch_result=similar_rows
+        )
+        ds = PostgresDatasource(pool)
+
+        result = await ds.get_similar_articles("news-001", threshold=0.8, limit=5)
+
+        assert [r.unique_id for r in result] == ["near"]

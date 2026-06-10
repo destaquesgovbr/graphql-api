@@ -78,6 +78,20 @@ type Article {
   theme1Level3Label: String
   mostSpecificThemeCode: String
   mostSpecificThemeLabel: String
+
+  """
+  Features computadas da notícia (entidades, popularidade/trending, leitura/legibilidade). Carregado sob demanda do Postgres (news_features) por unique_id via DataLoader; None quando não há features. Não onera listas/busca que não selecionam este campo.
+  """
+  features: ArticleFeatures
+}
+
+type ArticleFeatures {
+  entities: [EntityType!]!
+  viewCount: Int
+  uniqueSessions: Int
+  trendingScore: Float
+  wordCount: Int
+  readabilityFlesch: Float
 }
 
 input ArticleFilter {
@@ -88,6 +102,15 @@ input ArticleFilter {
   endDate: String = null
   themeLabel: String = null
   dedup: Boolean = null
+  entities: [String!] = null
+  sentiment: [String!] = null
+}
+
+enum ArticleSort {
+  RELEVANCE
+  DATE
+  TRENDING
+  VIEWS
 }
 
 type ArticlesResult {
@@ -211,6 +234,17 @@ input DeliveryChannelsInput {
   telegram: Boolean! = false
   push: Boolean! = false
   webhook: Boolean! = false
+}
+
+type EntityFacet {
+  value: String!
+  count: Int!
+}
+
+type EntityType {
+  text: String!
+  type: String!
+  count: Int!
 }
 
 type EstimateResult {
@@ -410,14 +444,14 @@ type Query {
   """Verifica se a API está funcionando"""
   ping: String!
 
-  """Lista artigos com filtros e paginação"""
-  articles(page: Int! = 1, limit: Int! = 10, filter: ArticleFilter = null): ArticlesResult!
+  """Lista artigos com filtros, paginação e ordenação"""
+  articles(page: Int! = 1, limit: Int! = 10, filter: ArticleFilter = null, sort: ArticleSort = null): ArticlesResult!
 
   """Busca artigo por ID"""
   article(uniqueId: String!): Article
 
   """Search articles with keyword or semantic search"""
-  search(query: String!, filter: ArticleFilter = null, page: Int! = 1, semantic: Boolean! = false, alpha: Float = null, dedup: Boolean! = false): ArticlesResult!
+  search(query: String!, filter: ArticleFilter = null, page: Int! = 1, semantic: Boolean! = false, alpha: Float = null, dedup: Boolean! = false, sort: ArticleSort = null): ArticlesResult!
 
   """Get search suggestions for autocomplete"""
   searchSuggestions(query: String!): [SearchSuggestion!]!
@@ -508,9 +542,14 @@ type Query {
   integrityBatch(batchSize: Int! = 50): [IntegrityCandidateType!]!
 
   """
-  Artigos relacionados a `uniqueId`, baseados no theme-code (Typesense). Replica a logica do portal: usa most_specific_theme_code quando presente, senao theme_1_level_1_code; exclui o proprio artigo; ordena por publishedAt desc; deduplica por content_hash. PUBLICO. (Distinto do `similarArticles` interno, baseado em embedding postgres.)
+  Artigos relacionados a `uniqueId` por similaridade semântica (embedding pgvector via news.content_embedding). O SQL exclui o próprio artigo, aplica threshold de similaridade e ordena por similaridade desc; os vizinhos são hidratados do índice Typesense preservando essa ordem. Retorna [] se o artigo não tiver embedding ou vizinhos. PÚBLICO. (Distinto do `similarArticles` interno, que devolve apenas unique_id/score.)
   """
   relatedArticles(uniqueId: String!, limit: Int! = 4): [Article!]!
+
+  """
+  Sugestões de entidades (facet) para o filtro de busca e as páginas de entidade. `type` (ORG/PER/LOC) restringe ao campo tipado; ausente usa o campo combinado `entities`. `query` filtra por prefixo. Ordenado por nº de artigos desc. PÚBLICO.
+  """
+  entitySuggestions(query: String! = "", type: String = null, limit: Int! = 10): [EntityFacet!]!
 
   """
   Contagem de artigos por code de tema (nivel `level`) nos ultimos `days` dias. `label` e None (o portal mapeia pela config). PUBLICO.

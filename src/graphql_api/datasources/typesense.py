@@ -94,6 +94,9 @@ def _iter_documents(response: dict):
 
 COLLECTION_NAME = "news"
 
+# Fase 2: campos facetáveis de entidade por tipo (combinado = `entities`).
+_ENTITY_FACET_FIELDS = {"ORG": "entity_org", "PER": "entity_per", "LOC": "entity_loc"}
+
 
 def _parse_typesense_conn(env_name: str) -> Optional[dict]:
     """Le e parseia uma env var no formato JSON `{"host":..., "port":..., "protocol":..., "apiKey":...}`.
@@ -166,6 +169,8 @@ class TypesenseDatasource:
         end_date: Optional[str] = None,
         tags: Optional[list[str]] = None,
         theme_label: Optional[str] = None,
+        entities: Optional[list[str]] = None,
+        sentiment: Optional[list[str]] = None,
         dedup: bool = False,
         vector: Optional[list[float]] = None,
         alpha: Optional[float] = None,
@@ -194,6 +199,14 @@ class TypesenseDatasource:
         if tags:
             joined = ", ".join(f"`{t}`" for t in tags)
             filter_parts.append(f"tags:[{joined}]")
+
+        if entities:
+            joined = ", ".join(f"`{e}`" for e in entities)
+            filter_parts.append(f"entities:[{joined}]")
+
+        if sentiment:
+            joined = ", ".join(f"`{s}`" for s in sentiment)
+            filter_parts.append(f"sentiment_label:[{joined}]")
 
         if start_date:
             dt = datetime.fromisoformat(start_date)
@@ -292,3 +305,60 @@ class TypesenseDatasource:
         for doc in _iter_documents(result):
             return _document_to_article(doc)
         return None
+
+    def get_articles_by_ids(self, unique_ids: list[str]) -> dict[str, ArticleDocument]:
+        """Busca múltiplos artigos por `unique_id` via SEARCH (filtro IN),
+        compatível com a search-only key (não usa `.documents[id].retrieve()`).
+
+        Retorna `{unique_id: ArticleDocument}` — o caller preserva a ordem
+        desejada (ex.: ordem de similaridade). Ids ausentes no índice
+        simplesmente não aparecem no dict.
+        """
+        if not unique_ids:
+            return {}
+        joined = ", ".join(f"`{uid}`" for uid in unique_ids)
+        per_page = min(max(len(unique_ids), 1), 250)
+        result = self.client.collections[COLLECTION_NAME].documents.search(
+            {
+                "q": "*",
+                "query_by": "title",
+                "filter_by": f"unique_id:[{joined}]",
+                "per_page": per_page,
+            }
+        )
+        docs: dict[str, ArticleDocument] = {}
+        for doc in _iter_documents(result):
+            article = _document_to_article(doc)
+            docs[article.unique_id] = article
+        return docs
+
+    def entity_facets(
+        self, query: str = "", entity_type: Optional[str] = None, limit: int = 10
+    ) -> list[tuple[str, int]]:
+        """Sugestões de entidades (facet) para o typeahead do filtro e o header
+        das páginas de entidade.
+
+        `entity_type` (ORG/PER/LOC) escolhe o campo tipado; ausente/desconhecido
+        usa o campo combinado `entities`. `query` (prefixo) filtra os valores via
+        `facet_query`. Retorna [(valor, contagem)] na ordem do Typesense
+        (desc por contagem).
+        """
+        field = _ENTITY_FACET_FIELDS.get((entity_type or "").upper(), "entities")
+        params: dict = {
+            "q": "*",
+            "query_by": "title",
+            "per_page": 0,
+            "facet_by": field,
+            "max_facet_values": limit,
+        }
+        if query and query.strip():
+            params["facet_query"] = f"{field}:{query.strip()}"
+
+        response = self.client.collections[COLLECTION_NAME].documents.search(params)
+
+        out: list[tuple[str, int]] = []
+        for fc in response.get("facet_counts", []):
+            if fc.get("field_name") == field:
+                for value in fc.get("counts", []):
+                    out.append((value["value"], value["count"]))
+        return out

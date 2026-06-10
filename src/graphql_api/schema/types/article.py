@@ -1,7 +1,14 @@
 from datetime import datetime
+from enum import Enum
 from typing import Optional
 
 import strawberry
+from strawberry.types import Info
+
+from graphql_api.schema.types.features import (
+    ArticleFeatures,
+    article_features_from_json,
+)
 
 
 @strawberry.type
@@ -32,6 +39,21 @@ class Article:
     most_specific_theme_code: Optional[str] = None
     most_specific_theme_label: Optional[str] = None
 
+    @strawberry.field(
+        description=(
+            "Features computadas da notícia (entidades, popularidade/trending, "
+            "leitura/legibilidade). Carregado sob demanda do Postgres "
+            "(news_features) por unique_id via DataLoader; None quando não há "
+            "features. Não onera listas/busca que não selecionam este campo."
+        )
+    )
+    async def features(self, info: Info) -> Optional[ArticleFeatures]:
+        loader = getattr(info.context, "features_loader", None)
+        if loader is None:
+            return None
+        raw = await loader.load(self.unique_id)
+        return article_features_from_json(raw)
+
 
 @strawberry.type
 class ArticlesResult:
@@ -52,3 +74,39 @@ class ArticleFilter:
     theme_label: Optional[str] = None
     # Quando true, deduplica por content_hash (group_by). Pass-through ao datasource.
     dedup: Optional[bool] = None
+    # Fase 2: filtro por entidades (match exato no campo Typesense `entities`)
+    # e por sentimento (sentiment_label: positive/neutral/negative).
+    entities: Optional[list[str]] = None
+    sentiment: Optional[list[str]] = None
+
+
+@strawberry.enum
+class ArticleSort(Enum):
+    """Ordenação dos resultados de listagem/busca."""
+
+    RELEVANCE = "relevance"
+    DATE = "date"
+    TRENDING = "trending"
+    VIEWS = "views"
+
+
+def sort_by_clause(
+    sort: Optional[ArticleSort], *, relevance_default: bool
+) -> Optional[str]:
+    """Mapeia `ArticleSort` para o `sort_by` do Typesense.
+
+    `relevance_default=True` (busca por keyword): None/RELEVANCE preservam a
+    relevância de text-match (retorna None → o datasource omite sort_by).
+    `relevance_default=False` (listagem sem query): caem para data desc.
+    Campos opcionais (trending_score, view_count) ausentes em docs antigos são
+    ordenados por último pelo Typesense — comportamento desejado.
+    """
+    if sort is None or sort == ArticleSort.RELEVANCE:
+        return None if relevance_default else "published_at:desc"
+    if sort == ArticleSort.DATE:
+        return "published_at:desc"
+    if sort == ArticleSort.TRENDING:
+        return "trending_score:desc"
+    if sort == ArticleSort.VIEWS:
+        return "view_count:desc"
+    return None

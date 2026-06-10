@@ -27,6 +27,12 @@ from strawberry.types import Info
 from graphql_api.datasources.typesense import ArticleDocument
 from graphql_api.schema.types.article import Article
 
+# Limiar de similaridade (cosine) para "notícias relacionadas" via pgvector.
+# Mais baixo que o threshold de clustering das DAGs (0.8) para garantir ~`limit`
+# vizinhos; o ORDER BY similarity desc + LIMIT no SQL já prioriza os mais
+# próximos, então o threshold só descarta vizinhos claramente não-relacionados.
+_RELATED_SIMILARITY_THRESHOLD = 0.6
+
 
 @strawberry.type
 class ThemeCount:
@@ -39,6 +45,15 @@ class ThemeCount:
     code: str
     label: Optional[str] = None
     count: int = 0
+
+
+@strawberry.type
+class EntityFacet:
+    """Sugestão de entidade (valor + nº de artigos) para o typeahead do filtro
+    e o header das páginas de entidade."""
+
+    value: str
+    count: int
 
 
 def _to_graphql_article(doc: ArticleDocument) -> Article:
@@ -83,46 +98,64 @@ def _published_at_ts(doc: ArticleDocument) -> float:
 class PublicContentQuery:
     @strawberry.field(
         description=(
-            "Artigos relacionados a `uniqueId`, baseados no theme-code (Typesense). "
-            "Replica a logica do portal: usa most_specific_theme_code quando "
-            "presente, senao theme_1_level_1_code; exclui o proprio artigo; "
-            "ordena por publishedAt desc; deduplica por content_hash. PUBLICO. "
-            "(Distinto do `similarArticles` interno, baseado em embedding postgres.)"
+            "Artigos relacionados a `uniqueId` por similaridade semântica "
+            "(embedding pgvector via news.content_embedding). O SQL exclui o "
+            "próprio artigo, aplica threshold de similaridade e ordena por "
+            "similaridade desc; os vizinhos são hidratados do índice Typesense "
+            "preservando essa ordem. Retorna [] se o artigo não tiver embedding "
+            "ou vizinhos. PÚBLICO. (Distinto do `similarArticles` interno, que "
+            "devolve apenas unique_id/score.)"
         )
     )
-    def related_articles(
+    async def related_articles(
         self,
         info: Info,
         unique_id: str,
         limit: int = 4,
     ) -> list[Article]:
         ctx = info.context
+        pg = ctx.postgres_ds
+        ts = ctx.typesense_ds
+        if pg is None or ts is None:
+            return []
+
+        # Sobre-busca (limit + margem) para compensar vizinhos eventualmente
+        # ausentes no índice Typesense. O SQL já exclui o próprio artigo,
+        # ordena por similaridade desc e respeita o threshold.
+        similar = await pg.get_similar_articles(
+            unique_id,
+            threshold=_RELATED_SIMILARITY_THRESHOLD,
+            limit=limit + 5,
+        )
+        if not similar:
+            return []
+
+        ordered_ids = [s.unique_id for s in similar]
+        docs_by_id = ts.get_articles_by_ids(ordered_ids)
+        ordered_docs = [docs_by_id[i] for i in ordered_ids if i in docs_by_id]
+        return [_to_graphql_article(d) for d in ordered_docs[:limit]]
+
+    @strawberry.field(
+        description=(
+            "Sugestões de entidades (facet) para o filtro de busca e as páginas "
+            "de entidade. `type` (ORG/PER/LOC) restringe ao campo tipado; ausente "
+            "usa o campo combinado `entities`. `query` filtra por prefixo. "
+            "Ordenado por nº de artigos desc. PÚBLICO."
+        )
+    )
+    def entity_suggestions(
+        self,
+        info: Info,
+        query: str = "",
+        type: Optional[str] = None,
+        limit: int = 10,
+    ) -> list[EntityFacet]:
+        ctx = info.context
         ds = ctx.typesense_ds
         if ds is None:
             return []
-
-        base = ds.get_article_by_id(unique_id)
-        if base is None:
-            return []
-
-        # Code-base: most_specific_theme_code se houver, senao L1. O datasource
-        # ja faz OR-across-levels para cada code em `themes`, exatamente como o
-        # portal (theme_1_level_1/2/3_code:=code OR'd).
-        theme_code = base.most_specific_theme_code or base.theme_1_level_1_code
-        if not theme_code:
-            return []
-
-        # Pede um a mais do que `limit` para compensar a possivel remocao do
-        # proprio artigo (o filtro unique_id:!= e feito in-resolver).
-        result = ds.search_articles(
-            page=1,
-            limit=limit + 1,
-            themes=[theme_code],
-            dedup=True,
-        )
-
-        similar = [a for a in result.articles if a.unique_id != unique_id]
-        return [_to_graphql_article(a) for a in similar[:limit]]
+        facets = ds.entity_facets(query=query, entity_type=type, limit=limit)
+        return [EntityFacet(value=value, count=count) for value, count in facets]
 
     @strawberry.field(
         description=(
