@@ -55,6 +55,24 @@ class SimilarArticleRecord:
 
 
 @dataclass
+class EntityRegistryRecord:
+    """Linha canônica de `entity_registry` (Fase 4 — canonicalização).
+
+    `aliases` é JSONB; asyncpg o devolve como str (sem codec), desserializado
+    em `_row_to_entity_registry`.
+    """
+
+    entity_id: str
+    canonical_name: Optional[str] = None
+    type: Optional[str] = None
+    aliases: list[str] = field(default_factory=list)
+    wikidata_id: Optional[str] = None
+    wikidata_url: Optional[str] = None
+    description: Optional[str] = None
+    agency_key: Optional[str] = None
+
+
+@dataclass
 class IntegrityCandidateRecord:
     unique_id: str
     url: str
@@ -88,6 +106,23 @@ _FEATURES_BATCH_SQL = """
 SELECT unique_id, features
 FROM news_features
 WHERE unique_id = ANY($1)
+"""
+
+# Fase 4 (canonicalização): linha canônica por entity_id. `aliases` é JSONB
+# (asyncpg devolve como str → json.loads). `description`/`wikidata_*` podem ser
+# nulos quando a entidade não foi linkada ao Wikidata.
+_ENTITY_REGISTRY_SQL = """
+SELECT entity_id, canonical_name, type, aliases,
+  wikidata_id, wikidata_url, description, agency_key
+FROM entity_registry
+WHERE entity_id = $1
+"""
+
+_ENTITY_REGISTRY_BATCH_SQL = """
+SELECT entity_id, canonical_name, type, aliases,
+  wikidata_id, wikidata_url, description, agency_key
+FROM entity_registry
+WHERE entity_id = ANY($1)
 """
 
 _NEWS_BASE_SQL = """
@@ -249,6 +284,37 @@ def _row_to_similar_article(row: dict) -> SimilarArticleRecord:
     )
 
 
+def _coerce_alias_list(raw: Any) -> list[str]:
+    """Normaliza `aliases` (JSONB) para `list[str]`. asyncpg devolve JSONB como
+    str → json.loads defensivo; valores não-lista ou itens não-string viram
+    lista vazia / são descartados (tolerante, nunca levanta)."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            out.append(item)
+    return out
+
+
+def _row_to_entity_registry(row: dict) -> EntityRegistryRecord:
+    return EntityRegistryRecord(
+        entity_id=row["entity_id"],
+        canonical_name=row.get("canonical_name"),
+        type=row.get("type"),
+        aliases=_coerce_alias_list(row.get("aliases")),
+        wikidata_id=row.get("wikidata_id"),
+        wikidata_url=row.get("wikidata_url"),
+        description=row.get("description"),
+        agency_key=row.get("agency_key"),
+    )
+
+
 def _row_to_integrity_candidate(row: dict) -> IntegrityCandidateRecord:
     integrity = row.get("integrity")
     if isinstance(integrity, str):
@@ -382,6 +448,36 @@ class PostgresDatasource:
             if isinstance(feats, str):
                 feats = json.loads(feats)
             result[row["unique_id"]] = feats or {}
+        return result
+
+    async def get_entity(self, entity_id: str) -> Optional[EntityRegistryRecord]:
+        """Carrega a linha canônica de `entity_registry` por `entity_id`
+        (QID Wikidata ou `dgb_<ulid>`). Retorna None quando não existe.
+
+        `aliases` (JSONB) é desserializado de str → list[str] (asyncpg não tem
+        codec de JSONB)."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(_ENTITY_REGISTRY_SQL, entity_id)
+        if row is None:
+            return None
+        return _row_to_entity_registry(dict(row))
+
+    async def get_entities_batch(
+        self, entity_ids: list[str]
+    ) -> dict[str, EntityRegistryRecord]:
+        """Carrega várias linhas de `entity_registry` numa query.
+
+        Retorna `{entity_id: EntityRegistryRecord}` só para os ids presentes —
+        usado para resolver `canonical_name` no modo canônico de
+        `entitySuggestions` sem N+1."""
+        if not entity_ids:
+            return {}
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(_ENTITY_REGISTRY_BATCH_SQL, entity_ids)
+        result: dict[str, EntityRegistryRecord] = {}
+        for r in rows:
+            rec = _row_to_entity_registry(dict(r))
+            result[rec.entity_id] = rec
         return result
 
     async def get_news_for_typesense(self, unique_id: str) -> Optional[TypesenseDocRecord]:

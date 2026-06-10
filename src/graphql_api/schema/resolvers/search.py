@@ -61,6 +61,7 @@ async def resolve_search(
         start_date=filter.start_date if filter else None,
         end_date=filter.end_date if filter else None,
         entities=filter.entities if filter else None,
+        entity_canonical=filter.entity_canonical if filter else None,
         sentiment=filter.sentiment if filter else None,
         dedup=dedup,
         sort_by=sort_by,

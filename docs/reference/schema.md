@@ -98,6 +98,7 @@ type Article {
 
 type ArticleFeatures {
   entities: [EntityType!]!
+  contentAnnotations: [ContentAnnotation!]!
   viewCount: Int
   uniqueSessions: Int
   trendingScore: Float
@@ -115,6 +116,7 @@ input ArticleFilter {
   dedup: Boolean = null
   entities: [String!] = null
   sentiment: [String!] = null
+  entityCanonical: [String!] = null
 }
 
 enum ArticleSort {
@@ -219,6 +221,14 @@ input ClippingInput {
   deliveryChannels: DeliveryChannelsInput = null
 }
 
+type ContentAnnotation {
+  start: Int!
+  end: Int!
+  type: String!
+  text: String!
+  canonicalId: String
+}
+
 """Daily article count"""
 type DailyCount {
   date: String!
@@ -250,12 +260,27 @@ input DeliveryChannelsInput {
 type EntityFacet {
   value: String!
   count: Int!
+  entityId: String
+  label: String
+}
+
+type EntityNode {
+  entityId: String!
+  canonicalName: String
+  type: String
+  aliases: [String!]!
+  wikidataId: String
+  wikidataUrl: String
+  description: String
+  agencyKey: String
 }
 
 type EntityType {
   text: String!
   type: String!
   count: Int!
+  canonicalId: String
+  salience: Float
 }
 
 type EstimateResult {
@@ -558,9 +583,14 @@ type Query {
   relatedArticles(uniqueId: String!, limit: Int! = 4): [Article!]!
 
   """
-  Sugestões de entidades (facet) para o filtro de busca e as páginas de entidade. `type` (ORG/PER/LOC) restringe ao campo tipado; ausente usa o campo combinado `entities`. `query` filtra por prefixo. Ordenado por nº de artigos desc. PÚBLICO.
+  Sugestões de entidades (facet) para o filtro de busca e as páginas de entidade. `type` (ORG/PER/LOC/EVENT/POLICY) restringe ao campo tipado; ausente usa o campo combinado `entities`. `type: CANONICAL` ativa o modo canônico: faceta `entity_canonical` e retorna `{value/entityId = canonical_id, label = canonical_name, count}` (label resolvido do entity_registry; None se ausente). `query` filtra por prefixo. Ordenado por nº de artigos desc. PÚBLICO.
   """
   entitySuggestions(query: String! = "", type: String = null, limit: Int! = 10): [EntityFacet!]!
+
+  """
+  Entidade canônica do entity_registry por `id` (entity_id: QID Wikidata 'Q216330' ou 'dgb_<ulid>'). None quando não existe. PÚBLICO.
+  """
+  entity(id: String!): EntityNode
 
   """
   Contagem de artigos por code de tema (nivel `level`) nos ultimos `days` dias. `label` e None (o portal mapeia pela config). PUBLICO.

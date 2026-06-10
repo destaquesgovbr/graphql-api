@@ -65,6 +65,7 @@ class ArticleQuery:
             end_date=filter.end_date if filter else None,
             theme_label=filter.theme_label if filter else None,
             entities=filter.entities if filter else None,
+            entity_canonical=filter.entity_canonical if filter else None,
             sentiment=filter.sentiment if filter else None,
             dedup=bool(filter.dedup) if filter else False,
             # Listagem sem query: None/RELEVANCE caem para data desc.
