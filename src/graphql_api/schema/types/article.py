@@ -78,6 +78,9 @@ class ArticleFilter:
     # e por sentimento (sentiment_label: positive/neutral/negative).
     entities: Optional[list[str]] = None
     sentiment: Optional[list[str]] = None
+    # Fase 4: filtro por entidade canônica (canonical_id/entity_id) — match
+    # exato no campo Typesense `entity_canonical` (dedup'd por entidade).
+    entity_canonical: Optional[list[str]] = None
 
 
 @strawberry.enum

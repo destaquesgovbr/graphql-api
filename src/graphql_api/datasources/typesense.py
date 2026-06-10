@@ -94,8 +94,17 @@ def _iter_documents(response: dict):
 
 COLLECTION_NAME = "news"
 
-# Fase 2: campos facetáveis de entidade por tipo (combinado = `entities`).
-_ENTITY_FACET_FIELDS = {"ORG": "entity_org", "PER": "entity_per", "LOC": "entity_loc"}
+# Fase 2/4: campos facetáveis de entidade por tipo (combinado = `entities`).
+# Fase 4 adiciona EVENT/POLICY (eram silenciosamente descartados no indexer) e
+# o pseudo-tipo CANONICAL → `entity_canonical` (facet de canonical_id dedup'd).
+_ENTITY_FACET_FIELDS = {
+    "ORG": "entity_org",
+    "PER": "entity_per",
+    "LOC": "entity_loc",
+    "EVENT": "entity_event",
+    "POLICY": "entity_policy",
+    "CANONICAL": "entity_canonical",
+}
 
 
 def _parse_typesense_conn(env_name: str) -> Optional[dict]:
@@ -170,6 +179,7 @@ class TypesenseDatasource:
         tags: Optional[list[str]] = None,
         theme_label: Optional[str] = None,
         entities: Optional[list[str]] = None,
+        entity_canonical: Optional[list[str]] = None,
         sentiment: Optional[list[str]] = None,
         dedup: bool = False,
         vector: Optional[list[float]] = None,
@@ -203,6 +213,12 @@ class TypesenseDatasource:
         if entities:
             joined = ", ".join(f"`{e}`" for e in entities)
             filter_parts.append(f"entities:[{joined}]")
+
+        if entity_canonical:
+            # Filtro por entidade canônica (canonical_id / entity_id). Match
+            # exato no campo `entity_canonical` (string[] facet); OR entre ids.
+            joined = ", ".join(f"`{e}`" for e in entity_canonical)
+            filter_parts.append(f"entity_canonical:[{joined}]")
 
         if sentiment:
             joined = ", ".join(f"`{s}`" for s in sentiment)

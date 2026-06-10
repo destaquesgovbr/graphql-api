@@ -475,6 +475,28 @@ class TestEntitySentimentFilters:
         assert "entities:[`Brasília`]" in fb
         assert "sentiment_label:[`positive`]" in fb
 
+    def test_filters_by_entity_canonical(self):
+        client = _mock_client(search_return={"hits": [], "found": 0})
+        ds = TypesenseDatasource(client)
+
+        ds.search_articles(entity_canonical=["Q216330", "dgb_abc"])
+
+        fb = client.collections["news"].documents.search.call_args[0][0]["filter_by"]
+        assert "entity_canonical:[" in fb
+        assert "`Q216330`" in fb
+        assert "`dgb_abc`" in fb
+
+    def test_entity_canonical_combines_with_entities(self):
+        client = _mock_client(search_return={"hits": [], "found": 0})
+        ds = TypesenseDatasource(client)
+
+        ds.search_articles(entities=["Brasília"], entity_canonical=["Q216330"])
+
+        fb = client.collections["news"].documents.search.call_args[0][0]["filter_by"]
+        assert " && " in fb
+        assert "entities:[`Brasília`]" in fb
+        assert "entity_canonical:[`Q216330`]" in fb
+
 
 class TestEntityFacets:
     def test_default_field_and_facet_query(self):
@@ -524,6 +546,19 @@ class TestEntityFacets:
 
     def test_typed_fields_per_and_loc(self):
         for entity_type, field in (("PER", "entity_per"), ("LOC", "entity_loc")):
+            client = _mock_client(search_return={"facet_counts": []})
+            ds = TypesenseDatasource(client)
+            ds.entity_facets(query="", entity_type=entity_type, limit=5)
+            params = client.collections["news"].documents.search.call_args[0][0]
+            assert params["facet_by"] == field
+
+    def test_typed_fields_event_policy_canonical(self):
+        # Fase 4: EVENT/POLICY (eram descartados) + CANONICAL (entity_canonical).
+        for entity_type, field in (
+            ("EVENT", "entity_event"),
+            ("POLICY", "entity_policy"),
+            ("CANONICAL", "entity_canonical"),
+        ):
             client = _mock_client(search_return={"facet_counts": []})
             ds = TypesenseDatasource(client)
             ds.entity_facets(query="", entity_type=entity_type, limit=5)

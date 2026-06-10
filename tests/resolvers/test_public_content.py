@@ -13,7 +13,7 @@ import strawberry
 
 from graphql_api.context import GraphQLContext, User
 from graphql_api.datasources.firestore import ClippingData, ReleaseData, SubscriptionData
-from graphql_api.datasources.postgres import SimilarArticleRecord
+from graphql_api.datasources.postgres import EntityRegistryRecord, SimilarArticleRecord
 from graphql_api.datasources.typesense import ArticleDocument, SearchResult
 from graphql_api.schema.resolvers.health import HealthQuery
 from graphql_api.schema.resolvers.public_content import PublicContentQuery
@@ -586,7 +586,24 @@ class TestSDL:
         block = sdl.split("type EntityFacet {", 1)[1].split("}", 1)[0]
         assert "value: String!" in block
         assert "count: Int!" in block
+        # Fase 4: campos canônicos opcionais (aditivos, não-quebrantes).
+        assert "entityId: String" in block
+        assert "label: String" in block
         assert "entitySuggestions(" in sdl
+
+    def test_entity_node_type_and_query_signature(self):
+        sdl = test_schema.as_str()
+        assert "type EntityNode {" in sdl
+        block = sdl.split("type EntityNode {", 1)[1].split("}", 1)[0]
+        assert "entityId: String!" in block
+        assert "canonicalName: String" in block
+        assert "type: String" in block
+        assert "aliases: [String!]!" in block
+        assert "wikidataId: String" in block
+        assert "wikidataUrl: String" in block
+        assert "description: String" in block
+        assert "agencyKey: String" in block
+        assert "entity(id: String!): EntityNode" in sdl
 
 
 # ---------------------------------------------------------------------------
@@ -603,13 +620,14 @@ ENTITY_SUGGESTIONS_QUERY = """
 
 
 class TestEntitySuggestions:
-    def test_maps_facets_to_entity_facet(self):
+    @pytest.mark.asyncio
+    async def test_maps_facets_to_entity_facet(self):
         ds = MagicMock()
         ds.entity_facets.return_value = [
             ("Ministério da Saúde", 12),
             ("Brasília", 5),
         ]
-        result = test_schema.execute_sync(
+        result = await test_schema.execute(
             ENTITY_SUGGESTIONS_QUERY,
             variable_values={"q": "min", "t": "ORG", "limit": 10},
             context_value=_ctx(typesense_ds=ds),
@@ -621,11 +639,168 @@ class TestEntitySuggestions:
         ]
         ds.entity_facets.assert_called_once_with(query="min", entity_type="ORG", limit=10)
 
-    def test_empty_when_no_datasource(self):
-        result = test_schema.execute_sync(
+    @pytest.mark.asyncio
+    async def test_empty_when_no_datasource(self):
+        result = await test_schema.execute(
             ENTITY_SUGGESTIONS_QUERY,
             variable_values={"q": "min", "t": None, "limit": 10},
             context_value=_ctx(),
         )
         assert result.errors is None, f"Errors: {result.errors}"
         assert result.data["entitySuggestions"] == []
+
+    @pytest.mark.asyncio
+    async def test_text_mode_does_not_touch_postgres(self):
+        # Modo texto (type != CANONICAL) não resolve labels: postgres intacto.
+        ts = MagicMock()
+        ts.entity_facets.return_value = [("Brasília", 3)]
+        pg = MagicMock()
+        pg.get_entities_batch = AsyncMock(return_value={})
+        result = await test_schema.execute(
+            ENTITY_SUGGESTIONS_QUERY,
+            variable_values={"q": "", "t": "LOC", "limit": 10},
+            context_value=_ctx(typesense_ds=ts, postgres_ds=pg),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["entitySuggestions"] == [{"value": "Brasília", "count": 3}]
+        pg.get_entities_batch.assert_not_called()
+
+
+CANONICAL_SUGGESTIONS_QUERY = """
+    query($q: String!, $t: String, $limit: Int!) {
+        entitySuggestions(query: $q, type: $t, limit: $limit) {
+            value
+            count
+            entityId
+            label
+        }
+    }
+"""
+
+
+class TestEntitySuggestionsCanonical:
+    @pytest.mark.asyncio
+    async def test_canonical_mode_resolves_labels(self):
+        ts = MagicMock()
+        # Valores facetados de entity_canonical = canonical_ids (entity_id).
+        ts.entity_facets.return_value = [("Q216330", 458), ("dgb_abc", 12)]
+        pg = MagicMock()
+        pg.get_entities_batch = AsyncMock(
+            return_value={
+                "Q216330": EntityRegistryRecord(
+                    entity_id="Q216330", canonical_name="Ministério da Educação"
+                ),
+                # dgb_abc existe mas sem canonical_name -> label None.
+                "dgb_abc": EntityRegistryRecord(entity_id="dgb_abc"),
+            }
+        )
+        result = await test_schema.execute(
+            CANONICAL_SUGGESTIONS_QUERY,
+            variable_values={"q": "", "t": "CANONICAL", "limit": 10},
+            context_value=_ctx(typesense_ds=ts, postgres_ds=pg),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["entitySuggestions"] == [
+            {
+                "value": "Q216330",
+                "count": 458,
+                "entityId": "Q216330",
+                "label": "Ministério da Educação",
+            },
+            {"value": "dgb_abc", "count": 12, "entityId": "dgb_abc", "label": None},
+        ]
+        # Faceta o campo entity_canonical (type passa pro datasource).
+        ts.entity_facets.assert_called_once_with(query="", entity_type="CANONICAL", limit=10)
+        pg.get_entities_batch.assert_awaited_once_with(["Q216330", "dgb_abc"])
+
+    @pytest.mark.asyncio
+    async def test_canonical_mode_without_postgres_keeps_value_fallback(self):
+        # Sem postgres_ds: value = canonical_id, label/entityId presentes mas
+        # label None (não-quebrante; o portal exibe o id).
+        ts = MagicMock()
+        ts.entity_facets.return_value = [("Q216330", 5)]
+        result = await test_schema.execute(
+            CANONICAL_SUGGESTIONS_QUERY,
+            variable_values={"q": "", "t": "CANONICAL", "limit": 10},
+            context_value=_ctx(typesense_ds=ts),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["entitySuggestions"] == [
+            {"value": "Q216330", "count": 5, "entityId": "Q216330", "label": None}
+        ]
+
+
+# ---------------------------------------------------------------------------
+# entity(id)
+# ---------------------------------------------------------------------------
+ENTITY_QUERY = """
+    query($id: String!) {
+        entity(id: $id) {
+            entityId
+            canonicalName
+            type
+            aliases
+            wikidataId
+            wikidataUrl
+            description
+            agencyKey
+        }
+    }
+"""
+
+
+class TestEntity:
+    @pytest.mark.asyncio
+    async def test_returns_entity_node(self):
+        pg = MagicMock()
+        pg.get_entity = AsyncMock(
+            return_value=EntityRegistryRecord(
+                entity_id="Q216330",
+                canonical_name="Ministério da Educação",
+                type="ORG",
+                aliases=["MEC", "Ministério da Educação (MEC)"],
+                wikidata_id="Q216330",
+                wikidata_url="https://www.wikidata.org/wiki/Q216330",
+                description="Ministério do Brasil",
+                agency_key="mec",
+            )
+        )
+        result = await test_schema.execute(
+            ENTITY_QUERY,
+            variable_values={"id": "Q216330"},
+            context_value=_ctx(postgres_ds=pg),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["entity"] == {
+            "entityId": "Q216330",
+            "canonicalName": "Ministério da Educação",
+            "type": "ORG",
+            "aliases": ["MEC", "Ministério da Educação (MEC)"],
+            "wikidataId": "Q216330",
+            "wikidataUrl": "https://www.wikidata.org/wiki/Q216330",
+            "description": "Ministério do Brasil",
+            "agencyKey": "mec",
+        }
+        pg.get_entity.assert_awaited_once_with("Q216330")
+
+    @pytest.mark.asyncio
+    async def test_null_when_not_found(self):
+        pg = MagicMock()
+        pg.get_entity = AsyncMock(return_value=None)
+        result = await test_schema.execute(
+            ENTITY_QUERY,
+            variable_values={"id": "missing"},
+            context_value=_ctx(postgres_ds=pg),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["entity"] is None
+
+    @pytest.mark.asyncio
+    async def test_null_without_postgres(self):
+        result = await test_schema.execute(
+            ENTITY_QUERY,
+            variable_values={"id": "Q1"},
+            context_value=_ctx(),  # sem postgres_ds
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["entity"] is None

@@ -39,6 +39,20 @@ ARTICLE_FEATURES_QUERY = """
     }
 """
 
+# Query estendida (Fase 4 + 5): canonicalId/salience nas entidades e
+# contentAnnotations.
+ARTICLE_FEATURES_CANONICAL_QUERY = """
+    query($id: String!) {
+        article(uniqueId: $id) {
+            uniqueId
+            features {
+                entities { text type count canonicalId salience }
+                contentAnnotations { start end type text canonicalId }
+            }
+        }
+    }
+"""
+
 
 def _ts_with_article(unique_id="a"):
     ts = MagicMock()
@@ -186,3 +200,176 @@ async def test_entity_count_zero_coerced_to_one():
     assert result.errors is None, f"Errors: {result.errors}"
     ents = result.data["article"]["features"]["entities"]
     assert ents == [{"text": "X", "type": "ORG", "count": 1}]
+
+
+# ---------------------------------------------------------------------------
+# Fase 4: canonicalId / salience nas entidades
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_entity_canonical_id_and_salience_parsed():
+    ts = _ts_with_article("a")
+    pg = _pg_with_features(
+        {
+            "a": {
+                "entities": [
+                    {
+                        "text": "Ministério da Educação (MEC)",
+                        "type": "ORG",
+                        "count": 3,
+                        "canonical_id": "Q216330",
+                        "salience": 0.82,
+                    },
+                ]
+            }
+        }
+    )
+    ctx = GraphQLContext(typesense_ds=ts, postgres_ds=pg)
+    result = await test_schema.execute(
+        ARTICLE_FEATURES_CANONICAL_QUERY, variable_values={"id": "a"}, context_value=ctx
+    )
+    assert result.errors is None, f"Errors: {result.errors}"
+    ents = result.data["article"]["features"]["entities"]
+    assert ents == [
+        {
+            "text": "Ministério da Educação (MEC)",
+            "type": "ORG",
+            "count": 3,
+            "canonicalId": "Q216330",
+            "salience": 0.82,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_entity_canonical_id_and_salience_default_null():
+    # Menção pré-canonicalização: canonical_id ausente → null; salience ausente.
+    ts = _ts_with_article("a")
+    pg = _pg_with_features(
+        {"a": {"entities": [{"text": "Finep", "type": "ORG", "count": 1}]}}
+    )
+    ctx = GraphQLContext(typesense_ds=ts, postgres_ds=pg)
+    result = await test_schema.execute(
+        ARTICLE_FEATURES_CANONICAL_QUERY, variable_values={"id": "a"}, context_value=ctx
+    )
+    assert result.errors is None, f"Errors: {result.errors}"
+    ents = result.data["article"]["features"]["entities"]
+    assert ents == [
+        {
+            "text": "Finep",
+            "type": "ORG",
+            "count": 1,
+            "canonicalId": None,
+            "salience": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_entity_malformed_salience_is_null_not_error():
+    ts = _ts_with_article("a")
+    pg = _pg_with_features(
+        {
+            "a": {
+                "entities": [
+                    # salience não-numérica e canonical_id vazio → tolerante (None).
+                    {
+                        "text": "X",
+                        "type": "ORG",
+                        "count": 1,
+                        "salience": "alta",
+                        "canonical_id": "",
+                    }
+                ]
+            }
+        }
+    )
+    ctx = GraphQLContext(typesense_ds=ts, postgres_ds=pg)
+    result = await test_schema.execute(
+        ARTICLE_FEATURES_CANONICAL_QUERY, variable_values={"id": "a"}, context_value=ctx
+    )
+    assert result.errors is None, f"Errors: {result.errors}"
+    ent = result.data["article"]["features"]["entities"][0]
+    assert ent["canonicalId"] is None
+    assert ent["salience"] is None
+
+
+# ---------------------------------------------------------------------------
+# Fase 5: contentAnnotations (lente semântica)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_content_annotations_parsed():
+    ts = _ts_with_article("a")
+    pg = _pg_with_features(
+        {
+            "a": {
+                "content_annotations": [
+                    {
+                        "start": 120,
+                        "end": 148,
+                        "type": "ORG",
+                        "text": "Ministério da Educação (MEC)",
+                        "canonical_id": "Q216330",
+                    },
+                    {"start": 510, "end": 513, "type": "ORG", "text": "MEC"},
+                ]
+            }
+        }
+    )
+    ctx = GraphQLContext(typesense_ds=ts, postgres_ds=pg)
+    result = await test_schema.execute(
+        ARTICLE_FEATURES_CANONICAL_QUERY, variable_values={"id": "a"}, context_value=ctx
+    )
+    assert result.errors is None, f"Errors: {result.errors}"
+    anns = result.data["article"]["features"]["contentAnnotations"]
+    assert anns == [
+        {
+            "start": 120,
+            "end": 148,
+            "type": "ORG",
+            "text": "Ministério da Educação (MEC)",
+            "canonicalId": "Q216330",
+        },
+        {"start": 510, "end": 513, "type": "ORG", "text": "MEC", "canonicalId": None},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_content_annotations_default_empty():
+    ts = _ts_with_article("a")
+    pg = _pg_with_features({"a": {"word_count": 5}})
+    ctx = GraphQLContext(typesense_ds=ts, postgres_ds=pg)
+    result = await test_schema.execute(
+        ARTICLE_FEATURES_CANONICAL_QUERY, variable_values={"id": "a"}, context_value=ctx
+    )
+    assert result.errors is None, f"Errors: {result.errors}"
+    assert result.data["article"]["features"]["contentAnnotations"] == []
+
+
+@pytest.mark.asyncio
+async def test_malformed_annotations_are_skipped():
+    ts = _ts_with_article("a")
+    pg = _pg_with_features(
+        {
+            "a": {
+                "content_annotations": [
+                    {"start": 0, "end": 5, "type": "ORG", "text": "Valid"},
+                    {"start": 5, "end": 5, "type": "ORG", "text": "ZeroLen"},  # end<=start
+                    {"start": -1, "end": 3, "type": "ORG", "text": "Neg"},  # start<0
+                    {"start": 10, "type": "ORG", "text": "NoEnd"},  # sem end
+                    {"start": 1, "end": 4, "text": "NoType"},  # sem type
+                    "string-solta",  # não-dict
+                    {"start": 7, "end": 9, "type": "LOC", "text": "OK2"},
+                ]
+            }
+        }
+    )
+    ctx = GraphQLContext(typesense_ds=ts, postgres_ds=pg)
+    result = await test_schema.execute(
+        ARTICLE_FEATURES_CANONICAL_QUERY, variable_values={"id": "a"}, context_value=ctx
+    )
+    assert result.errors is None, f"Errors: {result.errors}"
+    anns = result.data["article"]["features"]["contentAnnotations"]
+    assert anns == [
+        {"start": 0, "end": 5, "type": "ORG", "text": "Valid", "canonicalId": None},
+        {"start": 7, "end": 9, "type": "LOC", "text": "OK2", "canonicalId": None},
+    ]

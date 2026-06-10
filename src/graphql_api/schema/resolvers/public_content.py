@@ -50,10 +50,38 @@ class ThemeCount:
 @strawberry.type
 class EntityFacet:
     """Sugestão de entidade (valor + nº de artigos) para o typeahead do filtro
-    e o header das páginas de entidade."""
+    e o header das páginas de entidade.
+
+    Modo texto (default, back-compat): `value` é o texto da menção;
+    `entityId`/`label` ficam None. Modo canônico (`type: CANONICAL`): `value` e
+    `entityId` são o `canonical_id` (entity_id) e `label` é o `canonical_name`
+    resolvido do `entity_registry` (None se a entidade não estiver no registry)."""
 
     value: str
     count: int
+    # Fase 4 (modo canônico): id canônico e nome resolvido. None no modo texto.
+    entity_id: Optional[str] = None
+    label: Optional[str] = None
+
+
+@strawberry.type
+class EntityNode:
+    """Entidade canônica do `entity_registry` (Fase 4 — linked-data).
+
+    Nó cross-artigo: a mesma `Finep` recorrente em milhares de menções resolve
+    para uma única linha. `entityId` é o QID Wikidata ("Q216330") quando
+    linkado, senão "dgb_<ulid>". Campos de linkagem (`wikidataId`/`wikidataUrl`/
+    `description`) são None quando a entidade não foi linkada ao Wikidata;
+    `agencyKey` referencia o catálogo `agencies` quando ORG bate."""
+
+    entity_id: str
+    canonical_name: Optional[str] = None
+    type: Optional[str] = None
+    aliases: list[str] = strawberry.field(default_factory=list)
+    wikidata_id: Optional[str] = None
+    wikidata_url: Optional[str] = None
+    description: Optional[str] = None
+    agency_key: Optional[str] = None
 
 
 def _to_graphql_article(doc: ArticleDocument) -> Article:
@@ -138,12 +166,15 @@ class PublicContentQuery:
     @strawberry.field(
         description=(
             "Sugestões de entidades (facet) para o filtro de busca e as páginas "
-            "de entidade. `type` (ORG/PER/LOC) restringe ao campo tipado; ausente "
-            "usa o campo combinado `entities`. `query` filtra por prefixo. "
-            "Ordenado por nº de artigos desc. PÚBLICO."
+            "de entidade. `type` (ORG/PER/LOC/EVENT/POLICY) restringe ao campo "
+            "tipado; ausente usa o campo combinado `entities`. `type: CANONICAL` "
+            "ativa o modo canônico: faceta `entity_canonical` e retorna "
+            "`{value/entityId = canonical_id, label = canonical_name, count}` "
+            "(label resolvido do entity_registry; None se ausente). `query` "
+            "filtra por prefixo. Ordenado por nº de artigos desc. PÚBLICO."
         )
     )
-    def entity_suggestions(
+    async def entity_suggestions(
         self,
         info: Info,
         query: str = "",
@@ -155,7 +186,58 @@ class PublicContentQuery:
         if ds is None:
             return []
         facets = ds.entity_facets(query=query, entity_type=type, limit=limit)
+
+        # Modo canônico: os valores facetados são canonical_id (entity_id).
+        # Resolve canonical_name do entity_registry (Postgres) num batch e
+        # popula label/entityId. Sem Postgres, mantém value como fallback (o
+        # portal exibe o id) — não-quebrante.
+        if (type or "").upper() == "CANONICAL":
+            pg = ctx.postgres_ds
+            names: dict[str, str] = {}
+            if pg is not None and facets:
+                records = await pg.get_entities_batch([value for value, _ in facets])
+                names = {
+                    eid: rec.canonical_name
+                    for eid, rec in records.items()
+                    if rec.canonical_name
+                }
+            return [
+                EntityFacet(
+                    value=value,
+                    count=count,
+                    entity_id=value,
+                    label=names.get(value),
+                )
+                for value, count in facets
+            ]
+
         return [EntityFacet(value=value, count=count) for value, count in facets]
+
+    @strawberry.field(
+        description=(
+            "Entidade canônica do entity_registry por `id` (entity_id: QID "
+            "Wikidata 'Q216330' ou 'dgb_<ulid>'). None quando não existe. "
+            "PÚBLICO."
+        )
+    )
+    async def entity(self, info: Info, id: str) -> Optional[EntityNode]:
+        ctx = info.context
+        pg = ctx.postgres_ds
+        if pg is None:
+            return None
+        rec = await pg.get_entity(id)
+        if rec is None:
+            return None
+        return EntityNode(
+            entity_id=rec.entity_id,
+            canonical_name=rec.canonical_name,
+            type=rec.type,
+            aliases=rec.aliases,
+            wikidata_id=rec.wikidata_id,
+            wikidata_url=rec.wikidata_url,
+            description=rec.description,
+            agency_key=rec.agency_key,
+        )
 
     @strawberry.field(
         description=(

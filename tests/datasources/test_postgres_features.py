@@ -3,7 +3,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from graphql_api.datasources.postgres import _UPSERT_FEATURES_SQL, PostgresDatasource
+from graphql_api.datasources.postgres import (
+    _UPSERT_FEATURES_SQL,
+    EntityRegistryRecord,
+    PostgresDatasource,
+)
 
 
 def _make_mock_pool():
@@ -87,11 +91,14 @@ class TestBatchUpsertFeatures:
         conn.execute.assert_not_awaited()
 
 
-def _make_fetch_pool(rows):
-    """Pool mock com `conn.fetch` retornando `rows` (lista de dicts)."""
+def _make_fetch_pool(rows, *, fetchrow=None):
+    """Pool mock com `conn.fetch` retornando `rows` (lista de dicts).
+
+    `fetchrow` opcional define o retorno de `conn.fetchrow` (linha única)."""
     pool = MagicMock()
     conn = AsyncMock()
     conn.fetch = AsyncMock(return_value=rows)
+    conn.fetchrow = AsyncMock(return_value=fetchrow)
     acq = AsyncMock()
     acq.__aenter__ = AsyncMock(return_value=conn)
     acq.__aexit__ = AsyncMock(return_value=False)
@@ -140,6 +147,130 @@ class TestGetFeaturesBatch:
         ds = PostgresDatasource(pool)
 
         result = await ds.get_features_batch([])
+
+        assert result == {}
+        conn.fetch.assert_not_awaited()
+
+
+class TestGetEntity:
+    @pytest.mark.asyncio
+    async def test_maps_row_to_entity_registry_record(self):
+        row = {
+            "entity_id": "Q216330",
+            "canonical_name": "Ministério da Educação",
+            "type": "ORG",
+            "aliases": ["MEC", "Ministério da Educação (MEC)"],
+            "wikidata_id": "Q216330",
+            "wikidata_url": "https://www.wikidata.org/wiki/Q216330",
+            "description": "Ministério do Brasil",
+            "agency_key": "mec",
+        }
+        pool, conn = _make_fetch_pool([], fetchrow=row)
+        ds = PostgresDatasource(pool)
+
+        rec = await ds.get_entity("Q216330")
+
+        assert isinstance(rec, EntityRegistryRecord)
+        assert rec.entity_id == "Q216330"
+        assert rec.canonical_name == "Ministério da Educação"
+        assert rec.type == "ORG"
+        assert rec.aliases == ["MEC", "Ministério da Educação (MEC)"]
+        assert rec.wikidata_id == "Q216330"
+        assert rec.agency_key == "mec"
+        conn.fetchrow.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_aliases_jsonb_string_is_parsed(self):
+        # asyncpg devolve JSONB como str (sem codec) — aliases deve virar list.
+        row = {
+            "entity_id": "dgb_abc",
+            "canonical_name": "Pé-de-Meia",
+            "type": "POLICY",
+            "aliases": '["Pé de Meia", "Pe-de-Meia"]',
+            "wikidata_id": None,
+            "wikidata_url": None,
+            "description": None,
+            "agency_key": None,
+        }
+        pool, _ = _make_fetch_pool([], fetchrow=row)
+        ds = PostgresDatasource(pool)
+
+        rec = await ds.get_entity("dgb_abc")
+
+        assert rec.aliases == ["Pé de Meia", "Pe-de-Meia"]
+        assert rec.wikidata_id is None
+
+    @pytest.mark.asyncio
+    async def test_aliases_null_or_malformed_becomes_empty_list(self):
+        row = {
+            "entity_id": "dgb_x",
+            "canonical_name": "X",
+            "type": "MISC",
+            "aliases": None,
+            "wikidata_id": None,
+            "wikidata_url": None,
+            "description": None,
+            "agency_key": None,
+        }
+        pool, _ = _make_fetch_pool([], fetchrow=row)
+        ds = PostgresDatasource(pool)
+
+        rec = await ds.get_entity("dgb_x")
+
+        assert rec.aliases == []
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_not_found(self):
+        pool, _ = _make_fetch_pool([], fetchrow=None)
+        ds = PostgresDatasource(pool)
+
+        rec = await ds.get_entity("missing")
+
+        assert rec is None
+
+
+class TestGetEntitiesBatch:
+    @pytest.mark.asyncio
+    async def test_returns_dict_keyed_by_entity_id(self):
+        rows = [
+            {
+                "entity_id": "Q216330",
+                "canonical_name": "Ministério da Educação",
+                "type": "ORG",
+                "aliases": ["MEC"],
+                "wikidata_id": "Q216330",
+                "wikidata_url": None,
+                "description": None,
+                "agency_key": "mec",
+            },
+            {
+                "entity_id": "dgb_abc",
+                "canonical_name": "Pé-de-Meia",
+                "type": "POLICY",
+                "aliases": [],
+                "wikidata_id": None,
+                "wikidata_url": None,
+                "description": None,
+                "agency_key": None,
+            },
+        ]
+        pool, conn = _make_fetch_pool(rows)
+        ds = PostgresDatasource(pool)
+
+        result = await ds.get_entities_batch(["Q216330", "dgb_abc", "ghost"])
+
+        assert set(result.keys()) == {"Q216330", "dgb_abc"}
+        assert result["Q216330"].canonical_name == "Ministério da Educação"
+        assert result["dgb_abc"].type == "POLICY"
+        assert "ghost" not in result
+        conn.fetch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_ids_returns_empty_no_query(self):
+        pool, conn = _make_fetch_pool([])
+        ds = PostgresDatasource(pool)
+
+        result = await ds.get_entities_batch([])
 
         assert result == {}
         conn.fetch.assert_not_awaited()
