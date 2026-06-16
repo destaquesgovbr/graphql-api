@@ -13,7 +13,14 @@ import strawberry
 
 from graphql_api.context import GraphQLContext, User
 from graphql_api.datasources.firestore import ClippingData, ReleaseData, SubscriptionData
-from graphql_api.datasources.postgres import EntityRegistryRecord, SimilarArticleRecord
+from graphql_api.datasources.postgres import (
+    EntityNetworkEdgeRecord,
+    EntityNetworkNodeRecord,
+    EntityNetworkRecord,
+    EntityRegistryRecord,
+    RelatedEntityRecord,
+    SimilarArticleRecord,
+)
 from graphql_api.datasources.typesense import ArticleDocument, SearchResult
 from graphql_api.schema.resolvers.health import HealthQuery
 from graphql_api.schema.resolvers.public_content import PublicContentQuery
@@ -604,6 +611,220 @@ class TestSDL:
         assert "description: String" in block
         assert "agencyKey: String" in block
         assert "entity(id: String!): EntityNode" in sdl
+
+    def test_related_entity_type_and_query_signature(self):
+        # Fase 6c: tipos do grafo de co-menção (aditivos).
+        sdl = test_schema.as_str()
+        assert "type RelatedEntity {" in sdl
+        block = sdl.split("type RelatedEntity {", 1)[1].split("}", 1)[0]
+        assert "canonicalId: String!" in block
+        assert "canonicalName: String" in block
+        assert "type: String" in block
+        assert "wikidataId: String" in block
+        assert "weight: Int!" in block
+        assert "kind: String!" in block
+        assert "relatedEntities(id: String!, limit: Int! = 12): [RelatedEntity!]!" in sdl
+
+    def test_entity_network_types_and_query_signature(self):
+        sdl = test_schema.as_str()
+        assert "type EntityNetworkNode {" in sdl
+        nblock = sdl.split("type EntityNetworkNode {", 1)[1].split("}", 1)[0]
+        assert "entityId: String!" in nblock
+        assert "canonicalName: String" in nblock
+        assert "type: String" in nblock
+        assert "wikidataId: String" in nblock
+
+        assert "type EntityNetworkEdge {" in sdl
+        eblock = sdl.split("type EntityNetworkEdge {", 1)[1].split("}", 1)[0]
+        assert "src: String!" in eblock
+        assert "dst: String!" in eblock
+        assert "weight: Int!" in eblock
+        assert "kind: String!" in eblock
+
+        assert "type EntityNetwork {" in sdl
+        gblock = sdl.split("type EntityNetwork {", 1)[1].split("}", 1)[0]
+        assert "nodes: [EntityNetworkNode!]!" in gblock
+        assert "edges: [EntityNetworkEdge!]!" in gblock
+
+        assert (
+            "entityNetwork(id: String!, depth: Int! = 1, limit: Int! = 50): EntityNetwork!"
+            in sdl
+        )
+
+
+# ---------------------------------------------------------------------------
+# relatedEntities (Fase 6c — 1-hop co-menção)
+# ---------------------------------------------------------------------------
+RELATED_ENTITIES_QUERY = """
+    query($id: String!, $limit: Int!) {
+        relatedEntities(id: $id, limit: $limit) {
+            canonicalId
+            canonicalName
+            type
+            wikidataId
+            weight
+            kind
+        }
+    }
+"""
+
+
+class TestRelatedEntities:
+    @pytest.mark.asyncio
+    async def test_maps_records_preserving_order(self):
+        pg = MagicMock()
+        pg.get_related_entities = AsyncMock(
+            return_value=[
+                RelatedEntityRecord(
+                    entity_id="Q216330",
+                    canonical_name="Ministério da Educação",
+                    type="ORG",
+                    wikidata_id="Q216330",
+                    weight=42,
+                    kind="co_mention",
+                ),
+                RelatedEntityRecord(
+                    entity_id="dgb_abc",
+                    canonical_name="Política X",
+                    type="POLICY",
+                    wikidata_id=None,
+                    weight=7,
+                    kind="co_mention",
+                ),
+            ]
+        )
+        result = await test_schema.execute(
+            RELATED_ENTITIES_QUERY,
+            variable_values={"id": "Q123", "limit": 12},
+            context_value=_ctx(postgres_ds=pg),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["relatedEntities"] == [
+            {
+                "canonicalId": "Q216330",
+                "canonicalName": "Ministério da Educação",
+                "type": "ORG",
+                "wikidataId": "Q216330",
+                "weight": 42,
+                "kind": "co_mention",
+            },
+            {
+                "canonicalId": "dgb_abc",
+                "canonicalName": "Política X",
+                "type": "POLICY",
+                "wikidataId": None,
+                "weight": 7,
+                "kind": "co_mention",
+            },
+        ]
+        pg.get_related_entities.assert_awaited_once_with("Q123", limit=12)
+
+    @pytest.mark.asyncio
+    async def test_default_limit(self):
+        pg = MagicMock()
+        pg.get_related_entities = AsyncMock(return_value=[])
+        query = "{ relatedEntities(id: \"Q1\") { canonicalId } }"
+        result = await test_schema.execute(query, context_value=_ctx(postgres_ds=pg))
+        assert result.errors is None, f"Errors: {result.errors}"
+        pg.get_related_entities.assert_awaited_once_with("Q1", limit=12)
+
+    @pytest.mark.asyncio
+    async def test_empty_without_postgres(self):
+        result = await test_schema.execute(
+            RELATED_ENTITIES_QUERY,
+            variable_values={"id": "Q1", "limit": 12},
+            context_value=_ctx(),  # sem postgres_ds
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["relatedEntities"] == []
+
+
+# ---------------------------------------------------------------------------
+# entityNetwork (Fase 6c — ego-network multi-hop)
+# ---------------------------------------------------------------------------
+ENTITY_NETWORK_QUERY = """
+    query($id: String!, $depth: Int!, $limit: Int!) {
+        entityNetwork(id: $id, depth: $depth, limit: $limit) {
+            nodes { entityId canonicalName type wikidataId }
+            edges { src dst weight kind }
+        }
+    }
+"""
+
+
+class TestEntityNetwork:
+    @pytest.mark.asyncio
+    async def test_maps_nodes_and_edges(self):
+        pg = MagicMock()
+        pg.get_entity_network = AsyncMock(
+            return_value=EntityNetworkRecord(
+                nodes=[
+                    EntityNetworkNodeRecord(
+                        entity_id="Q1",
+                        canonical_name="Finep",
+                        type="ORG",
+                        wikidata_id="Q1",
+                    ),
+                    EntityNetworkNodeRecord(
+                        entity_id="Q2",
+                        canonical_name="MCTI",
+                        type="ORG",
+                        wikidata_id="Q2",
+                    ),
+                ],
+                edges=[
+                    EntityNetworkEdgeRecord(
+                        src="Q1", dst="Q2", weight=9, kind="co_mention"
+                    ),
+                ],
+            )
+        )
+        result = await test_schema.execute(
+            ENTITY_NETWORK_QUERY,
+            variable_values={"id": "Q1", "depth": 2, "limit": 50},
+            context_value=_ctx(postgres_ds=pg),
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        data = result.data["entityNetwork"]
+        assert data["nodes"] == [
+            {
+                "entityId": "Q1",
+                "canonicalName": "Finep",
+                "type": "ORG",
+                "wikidataId": "Q1",
+            },
+            {
+                "entityId": "Q2",
+                "canonicalName": "MCTI",
+                "type": "ORG",
+                "wikidataId": "Q2",
+            },
+        ]
+        assert data["edges"] == [
+            {"src": "Q1", "dst": "Q2", "weight": 9, "kind": "co_mention"}
+        ]
+        pg.get_entity_network.assert_awaited_once_with("Q1", depth=2, limit=50)
+
+    @pytest.mark.asyncio
+    async def test_defaults_depth_and_limit(self):
+        pg = MagicMock()
+        pg.get_entity_network = AsyncMock(
+            return_value=EntityNetworkRecord(nodes=[], edges=[])
+        )
+        query = "{ entityNetwork(id: \"Q1\") { nodes { entityId } edges { src } } }"
+        result = await test_schema.execute(query, context_value=_ctx(postgres_ds=pg))
+        assert result.errors is None, f"Errors: {result.errors}"
+        pg.get_entity_network.assert_awaited_once_with("Q1", depth=1, limit=50)
+
+    @pytest.mark.asyncio
+    async def test_empty_without_postgres(self):
+        result = await test_schema.execute(
+            ENTITY_NETWORK_QUERY,
+            variable_values={"id": "Q1", "depth": 1, "limit": 50},
+            context_value=_ctx(),  # sem postgres_ds
+        )
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["entityNetwork"] == {"nodes": [], "edges": []}
 
 
 # ---------------------------------------------------------------------------

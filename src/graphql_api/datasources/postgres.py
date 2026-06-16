@@ -73,6 +73,50 @@ class EntityRegistryRecord:
 
 
 @dataclass
+class RelatedEntityRecord:
+    """Vizinho 1-hop de uma entidade na rede de co-menção (Fase 6c).
+
+    A "outra ponta" da aresta `entity_edges` (kind=co_mention) juntada com
+    `entity_registry` para hidratar nome/tipo/wikidata. `weight` = nº de artigos
+    em co-menção (campo agregado da aresta)."""
+
+    entity_id: str
+    canonical_name: Optional[str] = None
+    type: Optional[str] = None
+    wikidata_id: Optional[str] = None
+    weight: int = 0
+    kind: str = "co_mention"
+
+
+@dataclass
+class EntityNetworkNodeRecord:
+    """Nó da ego-network de uma entidade (Fase 6c)."""
+
+    entity_id: str
+    canonical_name: Optional[str] = None
+    type: Optional[str] = None
+    wikidata_id: Optional[str] = None
+
+
+@dataclass
+class EntityNetworkEdgeRecord:
+    """Aresta da ego-network (Fase 6c). `src`/`dst` são entity_ids."""
+
+    src: str
+    dst: str
+    weight: int = 0
+    kind: str = "co_mention"
+
+
+@dataclass
+class EntityNetworkRecord:
+    """Projeção de grafo (nós + arestas) ao redor de uma entidade (Fase 6c)."""
+
+    nodes: list[EntityNetworkNodeRecord] = field(default_factory=list)
+    edges: list[EntityNetworkEdgeRecord] = field(default_factory=list)
+
+
+@dataclass
 class IntegrityCandidateRecord:
     unique_id: str
     url: str
@@ -123,6 +167,82 @@ SELECT entity_id, canonical_name, type, aliases,
   wikidata_id, wikidata_url, description, agency_key
 FROM entity_registry
 WHERE entity_id = ANY($1)
+"""
+
+# Fase 6c — entidades relacionadas (1-hop). Lê arestas de co-menção em
+# `entity_edges` onde a entidade aparece em qualquer ponta (src_id OU dst_id),
+# pega a "outra ponta" e junta com `entity_registry` para hidratar
+# nome/tipo/wikidata. `entity_id` SEMPRE como `$1` parametrizado (sem
+# interpolação — risco de injection). Ordenado por weight desc; LIMIT em $2.
+# A ordem canônica src_id < dst_id em entity_edges garante 1 linha por par.
+_RELATED_ENTITIES_SQL = """
+SELECT
+  CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END AS other_id,
+  e.weight AS weight,
+  e.kind AS kind,
+  r.canonical_name AS canonical_name,
+  r.type AS type,
+  r.wikidata_id AS wikidata_id
+FROM entity_edges e
+JOIN entity_registry r
+  ON r.entity_id = CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END
+WHERE e.kind = 'co_mention'
+  AND ($1 IN (e.src_id, e.dst_id))
+ORDER BY e.weight DESC, other_id ASC
+LIMIT $2
+"""
+
+# Fase 6c — ego-network multi-hop (depth<=2) via CTE recursiva em `entity_edges`.
+# Parte de `$1` (parametrizado), expande pelas arestas de co-menção até `$2`
+# saltos (clampado a 2 no datasource), coletando o conjunto de entity_ids
+# alcançáveis. A travessia é não-direcionada: cada aresta conecta src_id↔dst_id
+# em ambos os sentidos. Nós e arestas são consultadas em duas queries que
+# compartilham a mesma CTE — evita produto cartesiano de juntar ambos numa só.
+_ENTITY_NETWORK_NODES_SQL = """
+WITH RECURSIVE reachable(entity_id, depth) AS (
+  SELECT $1::varchar, 0
+  UNION
+  SELECT
+    CASE WHEN e.src_id = rc.entity_id THEN e.dst_id ELSE e.src_id END,
+    rc.depth + 1
+  FROM entity_edges e
+  JOIN reachable rc
+    ON rc.entity_id IN (e.src_id, e.dst_id)
+  WHERE e.kind = 'co_mention'
+    AND rc.depth < $2
+)
+SELECT DISTINCT
+  r.entity_id AS entity_id,
+  r.canonical_name AS canonical_name,
+  r.type AS type,
+  r.wikidata_id AS wikidata_id
+FROM (SELECT DISTINCT entity_id FROM reachable) ni
+JOIN entity_registry r ON r.entity_id = ni.entity_id
+"""
+
+_ENTITY_NETWORK_EDGES_SQL = """
+WITH RECURSIVE reachable(entity_id, depth) AS (
+  SELECT $1::varchar, 0
+  UNION
+  SELECT
+    CASE WHEN e.src_id = rc.entity_id THEN e.dst_id ELSE e.src_id END,
+    rc.depth + 1
+  FROM entity_edges e
+  JOIN reachable rc
+    ON rc.entity_id IN (e.src_id, e.dst_id)
+  WHERE e.kind = 'co_mention'
+    AND rc.depth < $2
+),
+node_ids AS (
+  SELECT DISTINCT entity_id FROM reachable
+)
+SELECT e.src_id AS src, e.dst_id AS dst, e.weight AS weight, e.kind AS kind
+FROM entity_edges e
+WHERE e.kind = 'co_mention'
+  AND e.src_id IN (SELECT entity_id FROM node_ids)
+  AND e.dst_id IN (SELECT entity_id FROM node_ids)
+ORDER BY e.weight DESC
+LIMIT $3
 """
 
 _NEWS_BASE_SQL = """
@@ -315,6 +435,35 @@ def _row_to_entity_registry(row: dict) -> EntityRegistryRecord:
     )
 
 
+def _row_to_related_entity(row: dict) -> RelatedEntityRecord:
+    return RelatedEntityRecord(
+        entity_id=row["other_id"],
+        canonical_name=row.get("canonical_name"),
+        type=row.get("type"),
+        wikidata_id=row.get("wikidata_id"),
+        weight=row.get("weight") or 0,
+        kind=row.get("kind") or "co_mention",
+    )
+
+
+def _row_to_network_node(row: dict) -> EntityNetworkNodeRecord:
+    return EntityNetworkNodeRecord(
+        entity_id=row["entity_id"],
+        canonical_name=row.get("canonical_name"),
+        type=row.get("type"),
+        wikidata_id=row.get("wikidata_id"),
+    )
+
+
+def _row_to_network_edge(row: dict) -> EntityNetworkEdgeRecord:
+    return EntityNetworkEdgeRecord(
+        src=row["src"],
+        dst=row["dst"],
+        weight=row.get("weight") or 0,
+        kind=row.get("kind") or "co_mention",
+    )
+
+
 def _row_to_integrity_candidate(row: dict) -> IntegrityCandidateRecord:
     integrity = row.get("integrity")
     if isinstance(integrity, str):
@@ -479,6 +628,48 @@ class PostgresDatasource:
             rec = _row_to_entity_registry(dict(r))
             result[rec.entity_id] = rec
         return result
+
+    async def get_related_entities(
+        self, entity_id: str, limit: int = 12
+    ) -> list[RelatedEntityRecord]:
+        """Vizinhos 1-hop de `entity_id` na rede de co-menção (Fase 6c).
+
+        Lê `entity_edges` (kind=co_mention) onde a entidade aparece em qualquer
+        ponta, pega a "outra ponta" e junta com `entity_registry` para hidratar
+        nome/tipo/wikidata. Ordenado por weight desc; até `limit`. `entity_id`
+        sempre parametrizado ($1) — nunca interpolado (anti-injection)."""
+        if not entity_id:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(_RELATED_ENTITIES_SQL, entity_id, limit)
+        return [_row_to_related_entity(dict(r)) for r in rows]
+
+    async def get_entity_network(
+        self, entity_id: str, depth: int = 1, limit: int = 50
+    ) -> EntityNetworkRecord:
+        """Ego-network (nós + arestas) ao redor de `entity_id` (Fase 6c).
+
+        CTE recursiva em `entity_edges` (kind=co_mention), travessia
+        não-direcionada até `depth` saltos. `depth` é CLAMPado a [0, 2] aqui
+        (profundidades maiores ficam para o Neo4j numa iteração futura). `limit`
+        limita o nº de arestas (cap de tamanho do grafo). `entity_id` sempre
+        parametrizado ($1) — nunca interpolado (anti-injection). Nós e arestas
+        em duas queries que compartilham a mesma CTE."""
+        if not entity_id:
+            return EntityNetworkRecord(nodes=[], edges=[])
+        # Clamp defensivo: depth no máximo 2 (e mínimo 0).
+        safe_depth = max(0, min(int(depth), 2))
+        async with self._pool.acquire() as conn:
+            node_rows = await conn.fetch(
+                _ENTITY_NETWORK_NODES_SQL, entity_id, safe_depth
+            )
+            edge_rows = await conn.fetch(
+                _ENTITY_NETWORK_EDGES_SQL, entity_id, safe_depth, limit
+            )
+        return EntityNetworkRecord(
+            nodes=[_row_to_network_node(dict(r)) for r in node_rows],
+            edges=[_row_to_network_edge(dict(r)) for r in edge_rows],
+        )
 
     async def get_news_for_typesense(self, unique_id: str) -> Optional[TypesenseDocRecord]:
         query = _NEWS_TYPESENSE_SQL + " WHERE n.unique_id = $1"
