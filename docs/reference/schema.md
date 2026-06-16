@@ -264,6 +264,25 @@ type EntityFacet {
   label: String
 }
 
+type EntityNetwork {
+  nodes: [EntityNetworkNode!]!
+  edges: [EntityNetworkEdge!]!
+}
+
+type EntityNetworkEdge {
+  src: String!
+  dst: String!
+  weight: Int!
+  kind: String!
+}
+
+type EntityNetworkNode {
+  entityId: String!
+  canonicalName: String
+  type: String
+  wikidataId: String
+}
+
 type EntityNode {
   entityId: String!
   canonicalName: String
@@ -593,6 +612,16 @@ type Query {
   entity(id: String!): EntityNode
 
   """
+  Entidades relacionadas a `id` (entity_id) por co-menção (Fase 6c). Lê a rede de co-menção materializada (`entity_edges`, 1-hop), retorna os vizinhos hidratados do entity_registry, ordenados por `weight` (nº de artigos em co-menção) desc, até `limit`. Retorna [] sem Postgres ou sem vizinhos. PÚBLICO.
+  """
+  relatedEntities(id: String!, limit: Int! = 12): [RelatedEntity!]!
+
+  """
+  Ego-network (nós + arestas) ao redor de `id` (entity_id) para a visualização de rede (Fase 6c). Travessia não-direcionada na rede de co-menção (`entity_edges`) via CTE recursiva até `depth` saltos (CLAMPado a no máx 2; profundidades maiores ficam para o Neo4j futuro). `limit` limita o nº de arestas (cap de tamanho do grafo). Retorna {nodes:[], edges:[]} sem Postgres. PÚBLICO.
+  """
+  entityNetwork(id: String!, depth: Int! = 1, limit: Int! = 50): EntityNetwork!
+
+  """
   Contagem de artigos por code de tema (nivel `level`) nos ultimos `days` dias. `label` e None (o portal mapeia pela config). PUBLICO.
   """
   themeArticleCounts(days: Int! = 30, level: Int! = 1): [ThemeCount!]!
@@ -621,6 +650,15 @@ input RecorteInput {
   themes: [String!]! = []
   agencies: [String!]! = []
   keywords: [String!]! = []
+}
+
+type RelatedEntity {
+  canonicalId: String!
+  canonicalName: String
+  type: String
+  wikidataId: String
+  weight: Int!
+  kind: String!
 }
 
 type Release {

@@ -84,6 +84,50 @@ class EntityNode:
     agency_key: Optional[str] = None
 
 
+@strawberry.type
+class RelatedEntity:
+    """Entidade vizinha 1-hop na rede de co-menção (Fase 6c).
+
+    Campos canônicos achatados (canonicalId/canonicalName/type/wikidataId) +
+    `weight` (nº de artigos em co-menção) + `kind` (sempre 'co_mention' no
+    1º corte). Linka para `/entidades/[canonicalId]` no portal."""
+
+    canonical_id: str
+    canonical_name: Optional[str] = None
+    type: Optional[str] = None
+    wikidata_id: Optional[str] = None
+    weight: int = 0
+    kind: str = "co_mention"
+
+
+@strawberry.type
+class EntityNetworkNode:
+    """Nó da ego-network de uma entidade (Fase 6c — viz de rede)."""
+
+    entity_id: str
+    canonical_name: Optional[str] = None
+    type: Optional[str] = None
+    wikidata_id: Optional[str] = None
+
+
+@strawberry.type
+class EntityNetworkEdge:
+    """Aresta da ego-network (Fase 6c). `src`/`dst` são entity_ids."""
+
+    src: str
+    dst: str
+    weight: int = 0
+    kind: str = "co_mention"
+
+
+@strawberry.type
+class EntityNetwork:
+    """Projeção de grafo (nós + arestas) ao redor de uma entidade (Fase 6c)."""
+
+    nodes: list[EntityNetworkNode] = strawberry.field(default_factory=list)
+    edges: list[EntityNetworkEdge] = strawberry.field(default_factory=list)
+
+
 def _to_graphql_article(doc: ArticleDocument) -> Article:
     """Converte um `ArticleDocument` (datasource) para o tipo Strawberry `Article`,
     populando os 8 campos de tema (este resolver depende deles para similar/release).
@@ -237,6 +281,81 @@ class PublicContentQuery:
             wikidata_url=rec.wikidata_url,
             description=rec.description,
             agency_key=rec.agency_key,
+        )
+
+    @strawberry.field(
+        description=(
+            "Entidades relacionadas a `id` (entity_id) por co-menção (Fase 6c). "
+            "Lê a rede de co-menção materializada (`entity_edges`, 1-hop), "
+            "retorna os vizinhos hidratados do entity_registry, ordenados por "
+            "`weight` (nº de artigos em co-menção) desc, até `limit`. Retorna [] "
+            "sem Postgres ou sem vizinhos. PÚBLICO."
+        )
+    )
+    async def related_entities(
+        self,
+        info: Info,
+        id: str,
+        limit: int = 12,
+    ) -> list[RelatedEntity]:
+        ctx = info.context
+        pg = ctx.postgres_ds
+        if pg is None:
+            return []
+        records = await pg.get_related_entities(id, limit=limit)
+        return [
+            RelatedEntity(
+                canonical_id=rec.entity_id,
+                canonical_name=rec.canonical_name,
+                type=rec.type,
+                wikidata_id=rec.wikidata_id,
+                weight=rec.weight,
+                kind=rec.kind,
+            )
+            for rec in records
+        ]
+
+    @strawberry.field(
+        description=(
+            "Ego-network (nós + arestas) ao redor de `id` (entity_id) para a "
+            "visualização de rede (Fase 6c). Travessia não-direcionada na rede "
+            "de co-menção (`entity_edges`) via CTE recursiva até `depth` saltos "
+            "(CLAMPado a no máx 2; profundidades maiores ficam para o Neo4j "
+            "futuro). `limit` limita o nº de arestas (cap de tamanho do grafo). "
+            "Retorna {nodes:[], edges:[]} sem Postgres. PÚBLICO."
+        )
+    )
+    async def entity_network(
+        self,
+        info: Info,
+        id: str,
+        depth: int = 1,
+        limit: int = 50,
+    ) -> EntityNetwork:
+        ctx = info.context
+        pg = ctx.postgres_ds
+        if pg is None:
+            return EntityNetwork(nodes=[], edges=[])
+        net = await pg.get_entity_network(id, depth=depth, limit=limit)
+        return EntityNetwork(
+            nodes=[
+                EntityNetworkNode(
+                    entity_id=n.entity_id,
+                    canonical_name=n.canonical_name,
+                    type=n.type,
+                    wikidata_id=n.wikidata_id,
+                )
+                for n in net.nodes
+            ],
+            edges=[
+                EntityNetworkEdge(
+                    src=e.src,
+                    dst=e.dst,
+                    weight=e.weight,
+                    kind=e.kind,
+                )
+                for e in net.edges
+            ],
         )
 
     @strawberry.field(
