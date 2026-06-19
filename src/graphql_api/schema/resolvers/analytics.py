@@ -7,7 +7,6 @@ from graphql_api.schema.types.analytics import (
     AgencyPeriodMetrics,
     AgencyStats,
     AnalyticsKpis,
-    ArticleSummary,
     DailyCount,
     DateRange,
     Granularity,
