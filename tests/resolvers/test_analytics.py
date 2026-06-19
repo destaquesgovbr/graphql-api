@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import strawberry
@@ -11,6 +11,7 @@ from graphql_api.schema.resolvers.analytics import AnalyticsQuery
 @dataclass
 class FakeContext:
     typesense_ds: Any = None
+    postgres_ds: Any = None
 
 
 @strawberry.type
@@ -290,3 +291,115 @@ async def test_invalid_range_returns_error():
         context_value=FakeContext(typesense_ds=ts_mock),
     )
     assert result.errors is not None
+
+
+class TestAgencyAnalytics:
+    @pytest.mark.asyncio
+    async def test_retorna_metricas_por_periodo(self):
+        mock_pg = AsyncMock()
+        mock_pg.agency_analytics = AsyncMock(return_value=[
+            {
+                "period": "2024-01",
+                "agency_key": "mec",
+                "agency_name": "Ministério da Educação",
+                "article_count": 45,
+                "avg_sentiment_score": 0.62,
+                "pct_positive": 0.71,
+                "pct_negative": 0.08,
+                "avg_readability_flesch": 52.3,
+                "avg_word_count": 380.0,
+            }
+        ])
+        query = """
+        query {
+            agencyAnalytics(
+                agencies: ["mec"]
+                dateFrom: "2024-01-01"
+                dateTo: "2024-01-31"
+                granularity: MONTH
+            ) {
+                period agencyKey agencyName articleCount
+                avgSentimentScore pctPositive pctNegative
+                avgReadabilityFlesch avgWordCount
+            }
+        }
+        """
+        result = await test_schema.execute(
+            query,
+            context_value=FakeContext(postgres_ds=mock_pg),
+        )
+        assert result.errors is None
+        data = result.data["agencyAnalytics"][0]
+        assert data["period"] == "2024-01"
+        assert data["agencyKey"] == "mec"
+        assert data["articleCount"] == 45
+        mock_pg.agency_analytics.assert_awaited_once_with("month", ["mec"], "2024-01-01", "2024-01-31")
+
+    @pytest.mark.asyncio
+    async def test_agencias_vazias_levanta_erro(self):
+        mock_pg = AsyncMock()
+        query = """
+        query {
+            agencyAnalytics(agencies: [] dateFrom: "2024-01-01" dateTo: "2024-01-31" granularity: MONTH) {
+                period
+            }
+        }
+        """
+        result = await test_schema.execute(
+            query,
+            context_value=FakeContext(postgres_ds=mock_pg),
+        )
+        assert result.errors is not None
+
+
+class TestTrendingThemes:
+    @pytest.mark.asyncio
+    async def test_calcula_growth_score_e_filtra_por_threshold(self):
+        ts_mock = MagicMock()
+        def _search(params):
+            return {
+                "found": 100,
+                "facet_counts": [
+                    {"field_name": "theme_1_level_1_label", "counts": [
+                        {"value": "Saúde", "count": 21},
+                        {"value": "Educação", "count": 2},  # abaixo de min_articles=3
+                    ]}
+                ]
+            }
+        ts_mock.client.collections["news"].documents.search.side_effect = _search
+
+        query = """
+        query {
+            trendingThemes(windowDays: 7 baselineDays: 28 minArticles: 3 growthThreshold: 1.5) {
+                themeLabel windowCount baselineDailyAvg growthScore
+            }
+        }
+        """
+        result = await test_schema.execute(
+            query,
+            context_value=FakeContext(typesense_ds=ts_mock),
+        )
+        assert result.errors is None
+        themes = result.data["trendingThemes"]
+        # Saúde: window_daily=21/7=3, baseline_daily=21/28=0.75, growth=4.0 >= 1.5 ✓
+        assert len(themes) >= 1
+        saude = next(t for t in themes if t["themeLabel"] == "Saúde")
+        assert saude["growthScore"] > 1.5
+        # Educação < min_articles → excluída
+        assert all(t["themeLabel"] != "Educação" for t in themes)
+
+    @pytest.mark.asyncio
+    async def test_window_maior_que_baseline_levanta_erro(self):
+        ts_mock = MagicMock()
+        query = """
+        query {
+            trendingThemes(windowDays: 30 baselineDays: 7) {
+                themeLabel
+            }
+        }
+        """
+        result = await test_schema.execute(
+            query,
+            context_value=FakeContext(typesense_ds=ts_mock),
+        )
+        assert result.errors is not None

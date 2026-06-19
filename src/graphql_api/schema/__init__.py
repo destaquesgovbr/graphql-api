@@ -4,6 +4,7 @@ from graphql_api.schema.resolvers.agent import AgentSubscription
 from graphql_api.schema.resolvers.analytics import AnalyticsQuery
 from graphql_api.schema.resolvers.articles import ArticleQuery
 from graphql_api.schema.resolvers.clippings import ClippingMutation, ClippingQuery
+from graphql_api.schema.resolvers.entities import EntityQuery
 from graphql_api.schema.resolvers.health import HealthQuery
 from graphql_api.schema.resolvers.internal_mutations import InternalMutation
 from graphql_api.schema.resolvers.internal_queries import InternalQuery
@@ -30,6 +31,7 @@ class Query(
     UserQuery,
     InternalQuery,
     PublicContentQuery,
+    EntityQuery,
 ):
     pass
 
