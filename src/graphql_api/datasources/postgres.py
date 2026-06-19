@@ -323,6 +323,91 @@ LEFT JOIN themes tm ON n.most_specific_theme_id = tm.id
 LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
 """
 
+_AGENCY_ANALYTICS_SQL = """
+SELECT
+    DATE_TRUNC($1, n.published_at)::text AS period,
+    n.agency_key,
+    n.agency_name,
+    COUNT(*) AS article_count,
+    AVG((nf.features->>'sentiment_score')::float) AS avg_sentiment_score,
+    AVG(CASE WHEN (nf.features->>'sentiment_label') = 'positive' THEN 1.0 ELSE 0.0 END) AS pct_positive,
+    AVG(CASE WHEN (nf.features->>'sentiment_label') = 'negative' THEN 1.0 ELSE 0.0 END) AS pct_negative,
+    AVG((nf.features->>'readability_flesch')::float) AS avg_readability_flesch,
+    AVG((nf.features->>'word_count')::float) AS avg_word_count
+FROM news n
+LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
+WHERE n.agency_key = ANY($2)
+  AND n.published_at BETWEEN $3::timestamptz AND $4::timestamptz
+GROUP BY period, n.agency_key, n.agency_name
+ORDER BY period, n.agency_key
+"""
+
+# Série temporal de cobertura de uma entidade por agência e período.
+# `$1` = granularidade (day/week/month), `$2` = entity_id, `$3` = date_from
+# (NULL = sem limite inferior), `$4` = date_to (NULL = sem limite superior).
+_ENTITY_COVERAGE_SQL = """
+SELECT
+    DATE_TRUNC($1, ne.published_at)::text AS period,
+    n.agency_key,
+    n.agency_name,
+    COUNT(DISTINCT ne.unique_id) AS article_count,
+    SUM(ne.count) AS total_mentions,
+    AVG((nf.features->>'sentiment_score')::float) AS avg_sentiment_score
+FROM news_entities ne
+JOIN news n ON ne.unique_id = n.unique_id
+LEFT JOIN news_features nf ON ne.unique_id = nf.unique_id
+WHERE ne.entity_id = $2
+  AND ($3::timestamptz IS NULL OR ne.published_at >= $3::timestamptz)
+  AND ($4::timestamptz IS NULL OR ne.published_at <= $4::timestamptz)
+GROUP BY period, n.agency_key, n.agency_name
+ORDER BY period
+"""
+
+# Busca de entidades por nome ou alias: UNION entre match exato por alias
+# normalizado (unaccent + lower) e match fuzzy por trigrama (pg_trgm %).
+# `$1` = query, `$2` = tipo (NULL = todos), `$3` = limit.
+# Ordenado por confidence DESC, article_count DESC.
+_ENTITY_SEARCH_SQL = """
+SELECT
+    er.entity_id,
+    er.canonical_name,
+    er.type,
+    er.description,
+    er.wikidata_url,
+    er.agency_key,
+    COALESCE(er.aliases::text, '[]') AS aliases,
+    COALESCE(counts.article_count, 0) AS article_count,
+    1.0 AS confidence,
+    'alias_exact' AS match_type
+FROM entity_alias ea
+JOIN entity_registry er ON ea.entity_id = er.entity_id
+LEFT JOIN (
+    SELECT entity_id, COUNT(*) AS article_count FROM news_entities GROUP BY entity_id
+) counts ON er.entity_id = counts.entity_id
+WHERE ea.alias_norm = unaccent(lower($1))
+  AND ($2::text IS NULL OR er.type = $2)
+UNION ALL
+SELECT
+    er.entity_id,
+    er.canonical_name,
+    er.type,
+    er.description,
+    er.wikidata_url,
+    er.agency_key,
+    COALESCE(er.aliases::text, '[]') AS aliases,
+    COALESCE(counts.article_count, 0) AS article_count,
+    similarity(er.canonical_name, $1) AS confidence,
+    'trgm_fuzzy' AS match_type
+FROM entity_registry er
+LEFT JOIN (
+    SELECT entity_id, COUNT(*) AS article_count FROM news_entities GROUP BY entity_id
+) counts ON er.entity_id = counts.entity_id
+WHERE er.canonical_name % $1
+  AND ($2::text IS NULL OR er.type = $2)
+ORDER BY confidence DESC, article_count DESC
+LIMIT $3
+"""
+
 
 def _row_to_news_record(row: dict) -> NewsRecord:
     tags = row.get("tags") or []
@@ -752,3 +837,70 @@ class PostgresDatasource:
                     except Exception:
                         failed += 1
         return (processed, failed)
+
+    async def agency_analytics(
+        self,
+        granularity: str,
+        agencies: list[str],
+        date_from: str,
+        date_to: str,
+    ) -> list[dict]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(_AGENCY_ANALYTICS_SQL, granularity, agencies, date_from, date_to)
+        return [dict(r) for r in rows]
+
+    async def entity_coverage(
+        self,
+        entity_id: str,
+        granularity: str = "month",
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> list[dict]:
+        """Série temporal de cobertura de uma entidade por agência e período.
+
+        Parâmetros:
+        - `entity_id`: QID Wikidata ou `dgb_<ulid>` da entidade.
+        - `granularity`: resolução temporal — `day`, `week` ou `month` (padrão).
+        - `date_from`/`date_to`: filtros de data ISO 8601 (None = sem limite).
+
+        Retorna lista de dicts com chaves: `period`, `agency_key`, `agency_name`,
+        `article_count`, `total_mentions`, `avg_sentiment_score`.
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(_ENTITY_COVERAGE_SQL, granularity, entity_id, date_from, date_to)
+        return [dict(r) for r in rows]
+
+    async def entity_search(
+        self,
+        query: str,
+        entity_type: str | None = None,
+        limit: int = 5,
+    ) -> list[dict]:
+        """Busca fuzzy de entidades por nome ou alias.
+
+        UNION entre match exato no `entity_alias` (alias_norm) e match por
+        trigrama (pg_trgm %) no `canonical_name` de `entity_registry`.
+        `aliases` (JSONB) é desserializado de str → list[str].
+
+        Parâmetros:
+        - `query`: texto de busca (normalizado internamente pelo SQL via unaccent).
+        - `entity_type`: filtra por tipo (`ORG`, `PER`, `LOC`, etc.). None = todos.
+        - `limit`: número máximo de resultados (padrão 5; clampad a 20 no resolver).
+
+        Retorna lista de dicts com chaves: `entity_id`, `canonical_name`, `type`,
+        `description`, `wikidata_url`, `agency_key`, `aliases`, `article_count`,
+        `confidence`, `match_type`.
+        """
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(_ENTITY_SEARCH_SQL, query, entity_type, limit)
+        results = []
+        for r in rows:
+            row = dict(r)
+            aliases_raw = row.get("aliases", "[]")
+            if isinstance(aliases_raw, str):
+                try:
+                    row["aliases"] = json.loads(aliases_raw)
+                except Exception:
+                    row["aliases"] = []
+            results.append(row)
+        return results

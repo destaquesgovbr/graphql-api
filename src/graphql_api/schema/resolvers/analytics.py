@@ -1,13 +1,19 @@
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import strawberry
 
 from graphql_api.schema.types.analytics import (
+    AgencyPeriodMetrics,
     AgencyStats,
     AnalyticsKpis,
+    ArticleSummary,
     DailyCount,
     DateRange,
+    Granularity,
+    MetricType,
     ThemeStats,
+    TrendingThemeResult,
 )
 
 
@@ -137,3 +143,100 @@ class AnalyticsQuery:
         ]
         results.sort(key=lambda x: x.date)
         return results
+
+    @strawberry.field(description="Métricas de publicação por agência e período")
+    async def agency_analytics(
+        self,
+        info: strawberry.types.Info,
+        agencies: list[str],
+        date_from: str,
+        date_to: str,
+        granularity: Granularity = Granularity.MONTH,
+        metrics: Optional[list[MetricType]] = None,
+    ) -> list[AgencyPeriodMetrics]:
+        if not agencies:
+            raise ValueError("agencies não pode ser vazio")
+        ds = info.context.postgres_ds
+        rows = await ds.agency_analytics(granularity.value, agencies, date_from, date_to)
+        return [
+            AgencyPeriodMetrics(
+                period=str(row["period"]),
+                agency_key=row["agency_key"] or "",
+                agency_name=row.get("agency_name"),
+                article_count=int(row["article_count"] or 0),
+                avg_sentiment_score=row.get("avg_sentiment_score"),
+                pct_positive=row.get("pct_positive"),
+                pct_negative=row.get("pct_negative"),
+                avg_readability_flesch=row.get("avg_readability_flesch"),
+                avg_word_count=row.get("avg_word_count"),
+                top_themes=[],
+            )
+            for row in rows
+        ]
+
+    @strawberry.field(description="Temas em crescimento comparando janela recente com baseline histórico")
+    def trending_themes(
+        self,
+        info: strawberry.types.Info,
+        window_days: int = 7,
+        baseline_days: int = 28,
+        min_articles: int = 3,
+        growth_threshold: float = 1.5,
+        agency_key: Optional[str] = None,
+        limit: int = 10,
+    ) -> list[TrendingThemeResult]:
+        if window_days <= 0 or baseline_days <= 0:
+            raise ValueError("window_days e baseline_days devem ser > 0")
+        if window_days >= baseline_days:
+            raise ValueError("window_days deve ser menor que baseline_days")
+
+        ts = info.context.typesense_ds
+
+        def _ts_filter(days: int) -> str:
+            cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
+            return f"published_at:>={int(cutoff.timestamp())}"
+
+        agency_filter = f" && agency:{agency_key}" if agency_key else ""
+
+        window_resp = ts.client.collections["news"].documents.search({
+            "q": "*", "per_page": 0,
+            "filter_by": _ts_filter(window_days) + agency_filter,
+            "facet_by": "theme_1_level_1_label",
+            "max_facet_values": 100,
+        })
+        baseline_resp = ts.client.collections["news"].documents.search({
+            "q": "*", "per_page": 0,
+            "filter_by": _ts_filter(baseline_days) + agency_filter,
+            "facet_by": "theme_1_level_1_label",
+            "max_facet_values": 100,
+        })
+
+        window_counts = {
+            item["value"]: item["count"]
+            for item in _extract_facets(window_resp, "theme_1_level_1_label")
+        }
+        baseline_counts = {
+            item["value"]: item["count"]
+            for item in _extract_facets(baseline_resp, "theme_1_level_1_label")
+        }
+
+        results = []
+        for theme, w_count in window_counts.items():
+            if w_count < min_articles:
+                continue
+            b_count = baseline_counts.get(theme, 0)
+            baseline_daily = b_count / baseline_days if b_count > 0 else 0.001
+            window_daily = w_count / window_days
+            growth = window_daily / baseline_daily
+            if growth >= growth_threshold:
+                results.append(TrendingThemeResult(
+                    theme_label=theme,
+                    theme_code=None,
+                    window_count=w_count,
+                    baseline_daily_avg=round(baseline_daily, 3),
+                    growth_score=round(growth, 3),
+                    top_articles=[],
+                ))
+
+        results.sort(key=lambda x: x.growth_score, reverse=True)
+        return results[:limit]
