@@ -2,7 +2,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -846,7 +846,13 @@ class PostgresDatasource:
         date_to: str,
     ) -> list[dict]:
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(_AGENCY_ANALYTICS_SQL, granularity, agencies, date_from, date_to)
+            rows = await conn.fetch(
+                _AGENCY_ANALYTICS_SQL,
+                granularity,
+                agencies,
+                date.fromisoformat(date_from),
+                date.fromisoformat(date_to),
+            )
         return [dict(r) for r in rows]
 
     async def entity_coverage(
@@ -867,7 +873,13 @@ class PostgresDatasource:
         `article_count`, `total_mentions`, `avg_sentiment_score`.
         """
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(_ENTITY_COVERAGE_SQL, granularity, entity_id, date_from, date_to)
+            rows = await conn.fetch(
+                _ENTITY_COVERAGE_SQL,
+                granularity,
+                entity_id,
+                date.fromisoformat(date_from) if date_from else None,
+                date.fromisoformat(date_to) if date_to else None,
+            )
         return [dict(r) for r in rows]
 
     async def entity_search(
