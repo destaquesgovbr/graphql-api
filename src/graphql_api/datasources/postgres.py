@@ -384,7 +384,7 @@ JOIN entity_registry er ON ea.entity_id = er.entity_id
 LEFT JOIN (
     SELECT entity_id, COUNT(*) AS article_count FROM news_entities GROUP BY entity_id
 ) counts ON er.entity_id = counts.entity_id
-WHERE ea.alias_norm = unaccent(lower($1))
+WHERE ea.alias_norm = lower($1)
   AND ($2::text IS NULL OR er.type = $2)
 UNION ALL
 SELECT
