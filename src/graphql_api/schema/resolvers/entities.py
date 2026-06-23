@@ -4,12 +4,46 @@ import strawberry
 from strawberry.types import Info
 
 from graphql_api.schema.types.analytics import Granularity
+from graphql_api.schema.types.article import Article, ArticlesResult
 from graphql_api.schema.types.entities import (
     EntityCoveragePoint,
     EntityKind,
     EntitySearchResult,
     TrendingEntityResult,
 )
+
+
+def _news_record_to_article(record) -> Article:
+    """Mapeia `NewsRecord` (Postgres) para `Article` (GraphQL)."""
+    from graphql_api.datasources.postgres import NewsRecord
+
+    if not isinstance(record, NewsRecord):
+        record = record
+    return Article(
+        unique_id=record.unique_id,
+        title=record.title,
+        url=record.url,
+        image=record.image_url,
+        video_url=record.video_url,
+        content=record.content,
+        summary=record.summary,
+        subtitle=record.subtitle,
+        editorial_lead=record.editorial_lead,
+        category=record.category,
+        tags=record.tags or [],
+        agency=record.agency_key,
+        agency_name=record.agency_name,
+        published_at=record.published_at,
+        extracted_at=record.extracted_at,
+        theme_1_level_1_code=record.theme_l1_code,
+        theme_1_level_1_label=record.theme_l1_label,
+        theme_1_level_2_code=record.theme_l2_code,
+        theme_1_level_2_label=record.theme_l2_label,
+        theme_1_level_3_code=record.theme_l3_code,
+        theme_1_level_3_label=record.theme_l3_label,
+        most_specific_theme_code=record.most_specific_theme_code,
+        most_specific_theme_label=record.most_specific_theme_label,
+    )
 
 
 @strawberry.type
@@ -65,6 +99,30 @@ class EntityQuery:
             )
             for row in rows
         ]
+
+    @strawberry.field(
+        description=(
+            "Artigos de uma entidade canônica via news_entities (Postgres direto). "
+            "Não depende do campo entityCanonical no Typesense."
+        )
+    )
+    async def entity_articles(
+        self,
+        info: Info,
+        entity_id: str,
+        page: int = 1,
+        limit: int = 10,
+    ) -> ArticlesResult:
+        ds = info.context.postgres_ds
+        safe_limit = min(max(limit, 1), 50)
+        safe_page = max(page, 1)
+        offset = (safe_page - 1) * safe_limit
+        records, total = await ds.get_entity_articles(entity_id, safe_limit, offset)
+        return ArticlesResult(
+            articles=[_news_record_to_article(r) for r in records],
+            page=safe_page,
+            found=total,
+        )
 
     @strawberry.field(description="Entidades NER com maior crescimento de cobertura (pré-computado)")
     async def trending_entities(
