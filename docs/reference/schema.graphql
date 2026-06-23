@@ -702,6 +702,11 @@ type Query {
   """Busca fuzzy de entidades por nome ou alias"""
   entitySearch(query: String!, entityType: EntityKind = null, limit: Int! = 5): [EntitySearchResult!]!
 
+  """
+  Artigos de uma entidade canônica via news_entities (Postgres direto). Não depende do campo entityCanonical no Typesense.
+  """
+  entityArticles(entityId: String!, page: Int! = 1, limit: Int! = 10): ArticlesResult!
+
   """Entidades NER com maior crescimento de cobertura (pré-computado)"""
   trendingEntities(limit: Int! = 10): [TrendingEntityResult!]!
 }

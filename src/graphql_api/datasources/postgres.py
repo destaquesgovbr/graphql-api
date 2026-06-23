@@ -418,6 +418,33 @@ _TRENDING_ENTITIES_SQL = """
     LIMIT $1
 """
 
+# Artigos de uma entidade canônica: deduplica por unique_id (news_entities pode
+# ter múltiplas linhas por artigo), ordena por published_at desc, pagina.
+# total_count = total sem paginação (subquery — evita window fn sobre outer LIMIT).
+_ENTITY_ARTICLES_SQL = """
+WITH entity_news AS (
+    SELECT DISTINCT ne.unique_id
+    FROM news_entities ne
+    WHERE ne.entity_id = $1
+)
+SELECT n.*,
+  t1.code AS theme_l1_code, t1.label AS theme_l1_label,
+  t2.code AS theme_l2_code, t2.label AS theme_l2_label,
+  t3.code AS theme_l3_code, t3.label AS theme_l3_label,
+  tm.code AS most_specific_theme_code, tm.label AS most_specific_theme_label,
+  nf.features,
+  (SELECT COUNT(*) FROM entity_news) AS total_count
+FROM entity_news en
+JOIN news n ON n.unique_id = en.unique_id
+LEFT JOIN themes t1 ON n.theme_l1_id = t1.id
+LEFT JOIN themes t2 ON n.theme_l2_id = t2.id
+LEFT JOIN themes t3 ON n.theme_l3_id = t3.id
+LEFT JOIN themes tm ON n.most_specific_theme_id = tm.id
+LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
+ORDER BY n.published_at DESC
+LIMIT $2 OFFSET $3
+"""
+
 
 def _row_to_news_record(row: dict) -> NewsRecord:
     tags = row.get("tags") or []
@@ -932,3 +959,22 @@ class PostgresDatasource:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(_TRENDING_ENTITIES_SQL, limit)
         return [dict(r) for r in rows]
+
+    async def get_entity_articles(
+        self,
+        entity_id: str,
+        limit: int = 10,
+        offset: int = 0,
+    ) -> tuple[list[NewsRecord], int]:
+        """Artigos de uma entidade canônica via `news_entities` (Postgres direto).
+
+        Retorna `(records, total_count)`. Deduplica por `unique_id` (news_entities
+        pode ter múltiplas linhas por artigo). Ordenado por `published_at DESC`.
+        Usa subquery para o total sem janelas desnecessárias."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(_ENTITY_ARTICLES_SQL, entity_id, limit, offset)
+        if not rows:
+            return [], 0
+        records = [_row_to_news_record(dict(r)) for r in rows]
+        total = int(rows[0]["total_count"])
+        return records, total
