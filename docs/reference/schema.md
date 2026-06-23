@@ -14,6 +14,19 @@ type Agency {
   label: String!
 }
 
+type AgencyPeriodMetrics {
+  period: String!
+  agencyKey: String!
+  agencyName: String
+  articleCount: Int!
+  avgSentimentScore: Float
+  pctPositive: Float
+  pctNegative: Float
+  avgReadabilityFlesch: Float
+  avgWordCount: Float
+  topThemes: [ThemeStats!]!
+}
+
 """Agency statistics with article count"""
 type AgencyStats {
   name: String!
@@ -124,6 +137,14 @@ enum ArticleSort {
   DATE
   TRENDING
   VIEWS
+}
+
+type ArticleSummary {
+  uniqueId: String!
+  title: String!
+  agencyName: String
+  publishedAt: String
+  trendingScore: Float
 }
 
 type ArticlesResult {
@@ -257,11 +278,29 @@ input DeliveryChannelsInput {
   webhook: Boolean! = false
 }
 
+type EntityCoveragePoint {
+  period: String!
+  agencyKey: String!
+  agencyName: String
+  articleCount: Int!
+  totalMentions: Int!
+  avgSentimentScore: Float
+}
+
 type EntityFacet {
   value: String!
   count: Int!
   entityId: String
   label: String
+}
+
+enum EntityKind {
+  ORG
+  PER
+  LOC
+  EVENT
+  POLICY
+  LAW
 }
 
 type EntityNetwork {
@@ -292,6 +331,19 @@ type EntityNode {
   wikidataUrl: String
   description: String
   agencyKey: String
+}
+
+type EntitySearchResult {
+  entityId: String!
+  canonicalName: String!
+  type: String!
+  description: String
+  wikidataUrl: String
+  agencyKey: String
+  aliases: [String!]!
+  articleCount: Int!
+  confidence: Float!
+  matchType: String!
 }
 
 type EntityType {
@@ -331,6 +383,12 @@ type FollowedListing {
   extraEmails: [String!]!
   webhookUrl: String
   followedAt: DateTime
+}
+
+enum Granularity {
+  DAY
+  WEEK
+  MONTH
 }
 
 type IntegrityCandidateType {
@@ -382,6 +440,13 @@ type MarketplaceRecorte {
   themes: [String!]!
   agencies: [String!]!
   keywords: [String!]!
+}
+
+enum MetricType {
+  VOLUME
+  SENTIMENT
+  READABILITY
+  THEMES
 }
 
 type Mutation {
@@ -532,6 +597,12 @@ type Query {
   """Daily article counts for the given date range"""
   articlesTimeline(range: DateRange!): [DailyCount!]!
 
+  """Métricas de publicação por agência e período"""
+  agencyAnalytics(agencies: [String!]!, dateFrom: String!, dateTo: String!, granularity: Granularity! = MONTH, metrics: [MetricType!] = null): [AgencyPeriodMetrics!]!
+
+  """Temas em crescimento comparando janela recente com baseline histórico"""
+  trendingThemes(windowDays: Int! = 7, baselineDays: Int! = 28, minArticles: Int! = 3, growthThreshold: Float! = 1.5, agencyKey: String = null, limit: Int! = 10): [TrendingThemeResult!]!
+
   """
   Lista todos os clippings do usuario autenticado (autorados + inscritos)
   """
@@ -635,6 +706,15 @@ type Query {
   Estima quantos artigos um recorte capturaria nas ultimas `sinceHours` horas. Replica `lib/estimate-recorte-count.ts`: filtro = themes OR-levels + agencies OR'd + published_at >= now-sinceHours; para keywords, conta por keyword (q em title,summary) e retorna o MAX; sem keywords, uma unica contagem. Substitui o mock `clippingEstimate`. PUBLICO.
   """
   estimateRecorteCount(themes: [String!]!, agencies: [String!]!, keywords: [String!]!, sinceHours: Int! = 24): Int!
+
+  """Série temporal de cobertura de uma entidade por agência"""
+  entityCoverage(entityId: String!, dateFrom: String = null, dateTo: String = null, granularity: Granularity! = MONTH): [EntityCoveragePoint!]!
+
+  """Busca fuzzy de entidades por nome ou alias"""
+  entitySearch(query: String!, entityType: EntityKind = null, limit: Int! = 5): [EntitySearchResult!]!
+
+  """Entidades NER com maior crescimento de cobertura (pré-computado)"""
+  trendingEntities(limit: Int! = 10): [TrendingEntityResult!]!
 }
 
 type Recorte {
@@ -725,6 +805,26 @@ type ThemeCount {
 type ThemeStats {
   label: String!
   count: Int!
+}
+
+type TrendingEntityResult {
+  entityId: String!
+  canonicalName: String!
+  type: String!
+  trendingScore: Float!
+  volumeRatio: Float!
+  windowCount: Int!
+  windowAgencies: Int!
+  computedAt: String
+}
+
+type TrendingThemeResult {
+  themeLabel: String!
+  themeCode: String
+  windowCount: Int!
+  baselineDailyAvg: Float!
+  growthScore: Float!
+  topArticles: [ArticleSummary!]!
 }
 
 type TypesenseDocRecordType {

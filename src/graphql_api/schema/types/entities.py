@@ -40,3 +40,15 @@ class EntitySearchResult:
     article_count: int
     confidence: float
     match_type: str
+
+
+@strawberry.type
+class TrendingEntityResult:
+    entity_id: str
+    canonical_name: str
+    type: str
+    trending_score: float
+    volume_ratio: float
+    window_count: int
+    window_agencies: int
+    computed_at: Optional[str]

@@ -409,6 +409,16 @@ LIMIT $3
 """
 
 
+_TRENDING_ENTITIES_SQL = """
+    SELECT entity_id, canonical_name, type,
+           trending_score, volume_ratio, window_count, window_agencies,
+           computed_at::text
+    FROM entity_trending_scores
+    ORDER BY trending_score DESC
+    LIMIT $1
+"""
+
+
 def _row_to_news_record(row: dict) -> NewsRecord:
     tags = row.get("tags") or []
     if isinstance(tags, str):
@@ -916,3 +926,9 @@ class PostgresDatasource:
                     row["aliases"] = []
             results.append(row)
         return results
+
+    async def get_trending_entities(self, limit: int = 10) -> list[dict]:
+        """Retorna entidades NER com maior trending score (pré-computado pelo DAG)."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(_TRENDING_ENTITIES_SQL, limit)
+        return [dict(r) for r in rows]

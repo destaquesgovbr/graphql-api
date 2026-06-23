@@ -8,6 +8,7 @@ from graphql_api.schema.types.entities import (
     EntityCoveragePoint,
     EntityKind,
     EntitySearchResult,
+    TrendingEntityResult,
 )
 
 
@@ -61,6 +62,28 @@ class EntityQuery:
                 article_count=int(row.get("article_count") or 0),
                 confidence=float(row.get("confidence") or 0.0),
                 match_type=row.get("match_type") or "",
+            )
+            for row in rows
+        ]
+
+    @strawberry.field(description="Entidades NER com maior crescimento de cobertura (pré-computado)")
+    async def trending_entities(
+        self,
+        info: Info,
+        limit: int = 10,
+    ) -> list[TrendingEntityResult]:
+        ds = info.context.postgres_ds
+        rows = await ds.get_trending_entities(min(limit, 50))
+        return [
+            TrendingEntityResult(
+                entity_id=row["entity_id"],
+                canonical_name=row.get("canonical_name") or "",
+                type=row.get("type") or "",
+                trending_score=float(row.get("trending_score") or 0.0),
+                volume_ratio=float(row.get("volume_ratio") or 0.0),
+                window_count=int(row.get("window_count") or 0),
+                window_agencies=int(row.get("window_agencies") or 0),
+                computed_at=row.get("computed_at"),
             )
             for row in rows
         ]
