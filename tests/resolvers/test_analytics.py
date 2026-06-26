@@ -403,3 +403,81 @@ class TestTrendingThemes:
             context_value=FakeContext(typesense_ds=ts_mock),
         )
         assert result.errors is not None
+
+
+class TestAgencyAnalyticsDayGapFill:
+    """Testa que granularity=DAY usa generate_series (gap-fill) e MONTH usa DATE_TRUNC."""
+
+    def _make_mock_pool(self, return_rows=None):
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_conn = AsyncMock()
+        mock_conn.fetch = AsyncMock(return_value=return_rows or [])
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+        return mock_pool, mock_conn
+
+    @pytest.mark.asyncio
+    async def test_day_granularity_usa_generate_series(self):
+        from graphql_api.datasources.postgres import PostgresDatasource
+
+        mock_pool, mock_conn = self._make_mock_pool()
+        ds = PostgresDatasource(pool=mock_pool)
+        await ds.agency_analytics("day", ["mec"], "2026-06-01", "2026-06-07")
+
+        sql_used = mock_conn.fetch.call_args[0][0]
+        assert "generate_series" in sql_used
+        # parâmetro $1 não é mais a granularidade — é a lista de agências
+        assert "DATE_TRUNC($1" not in sql_used
+
+    @pytest.mark.asyncio
+    async def test_month_granularity_usa_date_trunc(self):
+        from graphql_api.datasources.postgres import PostgresDatasource
+
+        mock_pool, mock_conn = self._make_mock_pool()
+        ds = PostgresDatasource(pool=mock_pool)
+        await ds.agency_analytics("month", ["mec"], "2026-06-01", "2026-06-30")
+
+        sql_used = mock_conn.fetch.call_args[0][0]
+        assert "generate_series" not in sql_used
+        assert "DATE_TRUNC($1" in sql_used
+
+    @pytest.mark.asyncio
+    async def test_day_retorna_zeros_para_dias_sem_artigos(self):
+        """Verifica que dias sem artigos retornam article_count=0 via COALESCE."""
+        from graphql_api.datasources.postgres import PostgresDatasource
+
+        # Simula DB retornando 2 dias: um com artigos e um com zeros
+        mock_rows = [
+            {
+                "period": "2026-06-01",
+                "agency_key": "mec",
+                "agency_name": "Ministério da Educação",
+                "article_count": 5,
+                "avg_sentiment_score": 0.6,
+                "pct_positive": 0.7,
+                "pct_negative": 0.1,
+                "avg_readability_flesch": 55.0,
+                "avg_word_count": 300.0,
+            },
+            {
+                "period": "2026-06-02",
+                "agency_key": "mec",
+                "agency_name": "Ministério da Educação",
+                "article_count": 0,
+                "avg_sentiment_score": None,
+                "pct_positive": None,
+                "pct_negative": None,
+                "avg_readability_flesch": None,
+                "avg_word_count": None,
+            },
+        ]
+        mock_pool, _ = self._make_mock_pool(return_rows=mock_rows)
+        ds = PostgresDatasource(pool=mock_pool)
+        result = await ds.agency_analytics("day", ["mec"], "2026-06-01", "2026-06-02")
+
+        assert len(result) == 2
+        assert result[0]["article_count"] == 5
+        assert result[1]["article_count"] == 0
+        assert result[1]["avg_sentiment_score"] is None
