@@ -342,6 +342,51 @@ GROUP BY period, n.agency_key, n.agency_name
 ORDER BY period, n.agency_key
 """
 
+# Variante para granularidade DAY: generate_series garante que todos os dias do
+# intervalo aparecem no resultado, mesmo sem artigos (article_count=0).
+# Parâmetros: $1=agencies, $2=date_from (date), $3=date_to (date).
+_AGENCY_ANALYTICS_DAY_SQL = """
+WITH date_series AS (
+    SELECT gs::date AS day
+    FROM generate_series($2::date, $3::date, '1 day'::interval) gs
+),
+agency_names AS (
+    SELECT DISTINCT agency_key, agency_name
+    FROM news
+    WHERE agency_key = ANY($1)
+),
+daily_agg AS (
+    SELECT
+        n.published_at::date AS day,
+        n.agency_key,
+        COUNT(*) AS article_count,
+        AVG((nf.features->>'sentiment_score')::float) AS avg_sentiment_score,
+        AVG(CASE WHEN (nf.features->>'sentiment_label') = 'positive' THEN 1.0 ELSE 0.0 END) AS pct_positive,
+        AVG(CASE WHEN (nf.features->>'sentiment_label') = 'negative' THEN 1.0 ELSE 0.0 END) AS pct_negative,
+        AVG((nf.features->>'readability_flesch')::float) AS avg_readability_flesch,
+        AVG((nf.features->>'word_count')::float) AS avg_word_count
+    FROM news n
+    LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
+    WHERE n.agency_key = ANY($1)
+      AND n.published_at::date BETWEEN $2::date AND $3::date
+    GROUP BY n.published_at::date, n.agency_key
+)
+SELECT
+    ds.day::text AS period,
+    an.agency_key,
+    an.agency_name,
+    COALESCE(da.article_count, 0) AS article_count,
+    da.avg_sentiment_score,
+    da.pct_positive,
+    da.pct_negative,
+    da.avg_readability_flesch,
+    da.avg_word_count
+FROM date_series ds
+CROSS JOIN agency_names an
+LEFT JOIN daily_agg da ON da.day = ds.day AND da.agency_key = an.agency_key
+ORDER BY ds.day, an.agency_key
+"""
+
 # Série temporal de cobertura de uma entidade por agência e período.
 # `$1` = granularidade (day/week/month), `$2` = entity_id, `$3` = date_from
 # (NULL = sem limite inferior), `$4` = date_to (NULL = sem limite superior).
@@ -882,14 +927,24 @@ class PostgresDatasource:
         date_from: str,
         date_to: str,
     ) -> list[dict]:
+        date_from_d = date.fromisoformat(date_from)
+        date_to_d = date.fromisoformat(date_to)
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                _AGENCY_ANALYTICS_SQL,
-                granularity,
-                agencies,
-                date.fromisoformat(date_from),
-                date.fromisoformat(date_to),
-            )
+            if granularity == "day":
+                rows = await conn.fetch(
+                    _AGENCY_ANALYTICS_DAY_SQL,
+                    agencies,
+                    date_from_d,
+                    date_to_d,
+                )
+            else:
+                rows = await conn.fetch(
+                    _AGENCY_ANALYTICS_SQL,
+                    granularity,
+                    agencies,
+                    date_from_d,
+                    date_to_d,
+                )
         return [dict(r) for r in rows]
 
     async def entity_coverage(
