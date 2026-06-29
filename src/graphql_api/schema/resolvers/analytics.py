@@ -7,6 +7,7 @@ from graphql_api.schema.types.analytics import (
     AgencyPeriodMetrics,
     AgencyStats,
     AnalyticsKpis,
+    ArticleSummary,
     DailyCount,
     DateRange,
     Granularity,
@@ -238,4 +239,38 @@ class AnalyticsQuery:
                 ))
 
         results.sort(key=lambda x: x.growth_score, reverse=True)
-        return results[:limit]
+        final = results[:limit]
+        for result in final:
+            safe_label = result.theme_label.replace('"', '\\"')
+            theme_filter = (
+                _ts_filter(window_days)
+                + agency_filter
+                + f' && theme_1_level_1_label:="{safe_label}"'
+            )
+            try:
+                art_resp = ts.client.collections["news"].documents.search({
+                    "q": "*",
+                    "per_page": 5,
+                    "filter_by": theme_filter,
+                    "sort_by": "trending_score:desc,published_at:desc",
+                    "include_fields": "id,unique_id,title,agency,published_at,trending_score",
+                })
+                result.top_articles = [
+                    ArticleSummary(
+                        unique_id=h["document"].get("unique_id") or h["document"].get("id", ""),
+                        title=h["document"].get("title") or "",
+                        agency_name=h["document"].get("agency"),
+                        published_at=(
+                            datetime.fromtimestamp(
+                                h["document"]["published_at"], tz=timezone.utc
+                            ).isoformat()
+                            if h["document"].get("published_at")
+                            else None
+                        ),
+                        trending_score=h["document"].get("trending_score"),
+                    )
+                    for h in art_resp.get("hits", [])
+                ]
+            except Exception:
+                pass
+        return final
