@@ -3,8 +3,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from graphql_api.schema.types.entities import PolicyListItem
 from graphql_api.schema.resolvers.entities import EntityQuery
+from graphql_api.schema.types.entities import PolicyListItem
 
 
 def _make_info(rows):
