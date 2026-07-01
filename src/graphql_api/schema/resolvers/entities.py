@@ -10,6 +10,7 @@ from graphql_api.schema.types.entities import (
     EntityKind,
     EntitySearchResult,
     PolicyDetails,
+    PolicyListItem,
     TrendingEntityResult,
 )
 
@@ -133,6 +134,35 @@ class EntityQuery:
     ) -> Optional[PolicyDetails]:
         ds = info.context.postgres_ds
         return await ds.get_policy_details(entity_id)
+
+    @strawberry.field(
+        description=(
+            "Lista entidades POLICY com metadados de ontologia (domain, lifecycle_phase) "
+            "e contagem de artigos. Filtros opcionais por domain e lifecyclePhase. PÚBLICO."
+        )
+    )
+    async def policies(
+        self,
+        info: Info,
+        domain: Optional[str] = None,
+        lifecycle_phase: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[PolicyListItem]:
+        ds = info.context.postgres_ds
+        rows = await ds.list_policies(domain, lifecycle_phase, min(limit, 200), offset)
+        return [
+            PolicyListItem(
+                entity_id=row["entity_id"],
+                canonical_name=row.get("canonical_name") or "",
+                domain=row.get("domain"),
+                lifecycle_phase=row.get("lifecycle_phase"),
+                wikidata_id=row.get("wikidata_id"),
+                aliases=row.get("aliases") or [],
+                article_count=int(row.get("article_count") or 0),
+            )
+            for row in rows
+        ]
 
     @strawberry.field(description="Entidades NER com maior crescimento de cobertura (pré-computado)")
     async def trending_entities(
