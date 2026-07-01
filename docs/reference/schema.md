@@ -12,6 +12,9 @@ SDL completo do schema GraphQL, gerado a partir do código (`graphql_api.schema:
 type Agency {
   code: String!
   label: String!
+
+  """True para agências republicadoras (EBC, Agência Brasil, TV Brasil)"""
+  isRepublisher: Boolean!
 }
 
 type AgencyPeriodMetrics {
@@ -102,6 +105,9 @@ type Article {
   theme1Level3Label: String
   mostSpecificThemeCode: String
   mostSpecificThemeLabel: String
+
+  """Hora de publicação (0-23), derivada de publishedAt"""
+  publicationHour: Int
 
   """
   Features computadas da notícia (entidades, popularidade/trending, leitura/legibilidade). Carregado sob demanda do Postgres (news_features) por unique_id via DataLoader; None quando não há features. Não onera listas/busca que não selecionam este campo.
@@ -534,6 +540,17 @@ type NewsRecordType {
   features: JSON
 }
 
+type PolicyDetails {
+  domain: String
+  lifecyclePhase: String
+  enablingLaws: [String!]!
+  responsibleAgencies: [String!]!
+  targetPopulation: [String!]!
+  firstMentionedDate: String
+  wikidataId: String
+  instanceOf: String
+}
+
 input PublishInput {
   name: String!
   description: String = null
@@ -717,6 +734,9 @@ type Query {
   Artigos de uma entidade canônica via news_entities (Postgres direto). Não depende do campo entityCanonical no Typesense.
   """
   entityArticles(entityId: String!, page: Int! = 1, limit: Int! = 10): ArticlesResult!
+
+  """Metadados de ontologia para entidades do tipo POLICY"""
+  policyDetails(entityId: String!): PolicyDetails
 
   """Entidades NER com maior crescimento de cobertura (pré-computado)"""
   trendingEntities(limit: Int! = 10): [TrendingEntityResult!]!

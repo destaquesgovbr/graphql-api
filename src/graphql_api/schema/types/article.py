@@ -39,6 +39,12 @@ class Article:
     most_specific_theme_code: Optional[str] = None
     most_specific_theme_label: Optional[str] = None
 
+    @strawberry.field(description="Hora de publicação (0-23), derivada de publishedAt")
+    def publication_hour(self) -> Optional[int]:
+        if self.published_at is None:
+            return None
+        return self.published_at.hour
+
     @strawberry.field(
         description=(
             "Features computadas da notícia (entidades, popularidade/trending, "
