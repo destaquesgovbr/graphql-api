@@ -9,6 +9,7 @@ from graphql_api.schema.types.entities import (
     EntityCoveragePoint,
     EntityKind,
     EntitySearchResult,
+    PolicyDetails,
     TrendingEntityResult,
 )
 
@@ -123,6 +124,15 @@ class EntityQuery:
             page=safe_page,
             found=total,
         )
+
+    @strawberry.field(description="Metadados de ontologia para entidades do tipo POLICY")
+    async def policy_details(
+        self,
+        info: Info,
+        entity_id: str,
+    ) -> Optional[PolicyDetails]:
+        ds = info.context.postgres_ds
+        return await ds.get_policy_details(entity_id)
 
     @strawberry.field(description="Entidades NER com maior crescimento de cobertura (pré-computado)")
     async def trending_entities(

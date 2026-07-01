@@ -1015,6 +1015,36 @@ class PostgresDatasource:
             rows = await conn.fetch(_TRENDING_ENTITIES_SQL, limit)
         return [dict(r) for r in rows]
 
+    async def get_policy_details(self, entity_id: str):
+        """Retorna metadados de ontologia de uma entidade POLICY.
+
+        Lê a coluna `extra` (JSONB) de `entity_registry` para entidades do tipo
+        POLICY. Retorna None se a entidade não existir ou não for do tipo POLICY.
+        `extra` é desserializado de str → dict (asyncpg não tem codec de JSONB)."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT type, extra FROM entity_registry WHERE entity_id = $1",
+                entity_id,
+            )
+        if not row or row["type"] != "POLICY":
+            return None
+        extra = row["extra"]
+        if isinstance(extra, str):
+            extra = json.loads(extra or "{}")
+        elif extra is None:
+            extra = {}
+        from graphql_api.schema.types.entities import PolicyDetails
+        return PolicyDetails(
+            domain=extra.get("domain"),
+            lifecycle_phase=extra.get("lifecycle_phase"),
+            enabling_laws=extra.get("enabling_laws", []),
+            responsible_agencies=extra.get("responsible_agencies", []),
+            target_population=extra.get("target_population", []),
+            first_mentioned_date=extra.get("first_mentioned_date"),
+            wikidata_id=extra.get("wikidata_id"),
+            instance_of=extra.get("instance_of"),
+        )
+
     async def get_entity_articles(
         self,
         entity_id: str,

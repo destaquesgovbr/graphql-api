@@ -52,3 +52,15 @@ class TrendingEntityResult:
     window_count: int
     window_agencies: int
     computed_at: Optional[str]
+
+
+@strawberry.type
+class PolicyDetails:
+    domain: Optional[str]           # SOCIAL|ECONOMIC|HEALTH|EDUCATION|SECURITY|ENVIRONMENT|GOVERNANCE
+    lifecycle_phase: Optional[str]  # ANNOUNCED|REGULATION|IMPLEMENTATION|EVALUATION|ROUTINE
+    enabling_laws: list[str]        # entity_ids de LAWs relacionadas
+    responsible_agencies: list[str] # agency keys
+    target_population: list[str]    # ex: ["estudantes", "idosos"]
+    first_mentioned_date: Optional[str]  # ISO date string
+    wikidata_id: Optional[str]
+    instance_of: Optional[str]      # QID da classe Wikidata
