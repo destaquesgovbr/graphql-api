@@ -454,6 +454,28 @@ LIMIT $3
 """
 
 
+_LIST_POLICIES_SQL = """
+    SELECT
+        er.entity_id,
+        er.canonical_name,
+        er.extra->>'domain'          AS domain,
+        er.extra->>'lifecycle_phase' AS lifecycle_phase,
+        er.extra->>'wikidata_id'     AS wikidata_id,
+        COALESCE(er.aliases::text, '[]') AS aliases,
+        COALESCE(ne.article_count, 0)::int AS article_count
+    FROM entity_registry er
+    LEFT JOIN (
+        SELECT entity_id, COUNT(DISTINCT unique_id) AS article_count
+        FROM news_entities
+        GROUP BY entity_id
+    ) ne ON ne.entity_id = er.entity_id
+    WHERE er.type = 'POLICY'
+      AND ($1::text IS NULL OR er.extra->>'domain' = $1)
+      AND ($2::text IS NULL OR er.extra->>'lifecycle_phase' = $2)
+    ORDER BY er.canonical_name ASC
+    LIMIT $3 OFFSET $4
+"""
+
 _TRENDING_ENTITIES_SQL = """
     SELECT entity_id, canonical_name, type,
            trending_score, volume_ratio, window_count, window_agencies,
@@ -1044,6 +1066,34 @@ class PostgresDatasource:
             wikidata_id=extra.get("wikidata_id"),
             instance_of=extra.get("instance_of"),
         )
+
+    async def list_policies(
+        self,
+        domain: str | None = None,
+        lifecycle_phase: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Lista entidades POLICY com metadados de ontologia e contagem de artigos."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                _LIST_POLICIES_SQL,
+                domain,
+                lifecycle_phase,
+                min(limit, 200),
+                offset,
+            )
+        result = []
+        for r in rows:
+            row = dict(r)
+            aliases_raw = row.get("aliases", "[]")
+            if isinstance(aliases_raw, str):
+                try:
+                    row["aliases"] = json.loads(aliases_raw)
+                except Exception:
+                    row["aliases"] = []
+            result.append(row)
+        return result
 
     async def get_entity_articles(
         self,

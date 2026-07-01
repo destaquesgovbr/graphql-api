@@ -55,6 +55,19 @@ class TrendingEntityResult:
 
 
 @strawberry.type
+class PolicyListItem:
+    """Entrada de política pública na listagem /politicas do portal."""
+
+    entity_id: str
+    canonical_name: str
+    domain: Optional[str]           # SOCIAL|ECONOMIC|HEALTH|EDUCATION|SECURITY|ENVIRONMENT|GOVERNANCE
+    lifecycle_phase: Optional[str]  # ANNOUNCED|REGULATION|IMPLEMENTATION|EVALUATION|ROUTINE
+    wikidata_id: Optional[str]
+    aliases: list[str]
+    article_count: int              # total de menções distintas no corpus
+
+
+@strawberry.type
 class PolicyDetails:
     domain: Optional[str]           # SOCIAL|ECONOMIC|HEALTH|EDUCATION|SECURITY|ENVIRONMENT|GOVERNANCE
     lifecycle_phase: Optional[str]  # ANNOUNCED|REGULATION|IMPLEMENTATION|EVALUATION|ROUTINE
