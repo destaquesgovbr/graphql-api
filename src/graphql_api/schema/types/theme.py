@@ -23,10 +23,19 @@ class Theme:
     label: str
 
 
+_REPUBLISHERS = frozenset({"agencia_brasil", "tvbrasil", "ebc", "radioagencia_nacional"})
+
+
 @strawberry.type
 class Agency:
     code: str
     label: str
+
+    @strawberry.field(
+        description="True para agências republicadoras (EBC, Agência Brasil, TV Brasil)"
+    )
+    def is_republisher(self) -> bool:
+        return self.code in _REPUBLISHERS
 
 
 @strawberry.type
