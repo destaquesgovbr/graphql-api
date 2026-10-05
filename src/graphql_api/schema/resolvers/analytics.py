@@ -16,6 +16,9 @@ from graphql_api.schema.types.analytics import (
     TrendingThemeResult,
 )
 
+# Teto de pontos do articlesTimeline: um ano (bissexto incluso).
+_TIMELINE_MAX_DAYS = 366
+
 
 def _extract_facets(response: dict, field_name: str) -> list[dict]:
     """Extract facet counts for a given field from a Typesense response."""
@@ -118,31 +121,28 @@ class AnalyticsQuery:
             for item in counts
         ]
 
-    @strawberry.field(description="Daily article counts for the given date range")
-    def articles_timeline(
+    @strawberry.field(
+        description=(
+            "Contagem diária de artigos nos últimos `range.days` dias de calendário em "
+            "America/Sao_Paulo (hoje incluso, parcial), em ordem crescente. Dias sem "
+            "artigo vêm com count 0. `range.days` é limitado a 366."
+        )
+    )
+    async def articles_timeline(
         self, info: strawberry.types.Info, range: DateRange
     ) -> list[DailyCount]:
         if range.days <= 0:
             raise ValueError("range.days must be greater than 0")
 
-        ts = info.context.typesense_ds
-        response = ts.client.collections["news"].documents.search(
-            {
-                "q": "*",
-                "per_page": 0,
-                "filter_by": _date_filter(range.days),
-                "facet_by": "published_date",
-                "max_facet_values": range.days,
-            }
-        )
-
-        counts = _extract_facets(response, "published_date")
-        results = [
-            DailyCount(date=item["value"], count=item["count"])
-            for item in counts
+        # Postgres (fonte da verdade, sem o atraso do Typesense); o facet
+        # `published_date` usado antes não existe na coleção.
+        days = min(range.days, _TIMELINE_MAX_DAYS)
+        ds = info.context.postgres_ds
+        rows = await ds.articles_timeline(days)
+        return [
+            DailyCount(date=str(row["day"]), count=int(row["count"] or 0))
+            for row in rows
         ]
-        results.sort(key=lambda x: x.date)
-        return results
 
     @strawberry.field(description="Métricas de publicação por agência e período")
     async def agency_analytics(

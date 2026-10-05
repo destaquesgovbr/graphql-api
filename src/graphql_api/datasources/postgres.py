@@ -403,6 +403,38 @@ LEFT JOIN daily_agg da ON da.day = ds.day AND da.agency_key = an.agency_key
 ORDER BY ds.day, an.agency_key
 """
 
+# Série diária de artigos da plataforma (articlesTimeline). Dias de calendário em
+# America/Sao_Paulo: os `$1` dias que terminam hoje (BRT), hoje incluso (parcial).
+# O filtro mantém `published_at` nua no WHERE (faixa sargável, usa o índice), com
+# limites = meia-noite BRT convertida para timestamptz; o agrupamento converte
+# cada artigo para o dia BRT. `generate_series` + LEFT JOIN + COALESCE garantem
+# um ponto por dia, com 0 nos dias sem artigo.
+_ARTICLES_TIMELINE_SQL = """
+WITH params AS (
+    SELECT (NOW() AT TIME ZONE 'America/Sao_Paulo')::date AS today
+),
+bounds AS (
+    SELECT today - ($1::int - 1) AS first_day, today AS last_day
+    FROM params
+),
+days AS (
+    SELECT gs::date AS day
+    FROM bounds b,
+         generate_series(b.first_day::timestamp, b.last_day::timestamp, INTERVAL '1 day') AS gs
+),
+counts AS (
+    SELECT (n.published_at AT TIME ZONE 'America/Sao_Paulo')::date AS day, COUNT(*) AS cnt
+    FROM news n
+    WHERE n.published_at >= (SELECT first_day::timestamp AT TIME ZONE 'America/Sao_Paulo' FROM bounds)
+      AND n.published_at < (SELECT (last_day + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo' FROM bounds)
+    GROUP BY 1
+)
+SELECT d.day::text AS day, COALESCE(c.cnt, 0)::int AS count
+FROM days d
+LEFT JOIN counts c ON c.day = d.day
+ORDER BY d.day
+"""
+
 # Série temporal de cobertura de uma entidade por agência e período.
 # `$1` = granularidade (day/week/month), `$2` = entity_id, `$3` = date_from
 # (NULL = sem limite inferior), `$4` = date_to (NULL = sem limite superior).
@@ -1011,6 +1043,16 @@ class PostgresDatasource:
                     date_from_d,
                     date_to_d,
                 )
+        return [dict(r) for r in rows]
+
+    async def articles_timeline(self, days: int) -> list[dict]:
+        """Contagem diária de artigos dos últimos `days` dias de calendário em
+        America/Sao_Paulo (hoje incluso). Um dict `{day: 'YYYY-MM-DD', count}`
+        por dia, em ordem crescente, com `count=0` nos dias sem artigo.
+
+        `days` chega validado e limitado (1..366) pelo resolver."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(_ARTICLES_TIMELINE_SQL, days)
         return [dict(r) for r in rows]
 
     async def entity_coverage(
