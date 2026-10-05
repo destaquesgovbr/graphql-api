@@ -274,3 +274,115 @@ class TestGetEntitiesBatch:
 
         assert result == {}
         conn.fetch.assert_not_awaited()
+
+
+# --- F0c: chave de sentimento (aninhada com fallback plano) ----------------------
+
+
+class TestSentimentHelper:
+    def test_aninhado(self):
+        from graphql_api.datasources.postgres import _sentiment
+
+        assert _sentiment({"sentiment": {"label": "positive", "score": 0.7}}) == ("positive", 0.7)
+
+    def test_fallback_plano(self):
+        from graphql_api.datasources.postgres import _sentiment
+
+        assert _sentiment({"sentiment_label": "negative", "sentiment_score": -0.2}) == ("negative", -0.2)
+
+    def test_aninhado_prevalece_e_completa_campo_a_campo(self):
+        # Mesma semântica do COALESCE do SQL: cada campo cai para o plano se o aninhado é nulo.
+        from graphql_api.datasources.postgres import _sentiment
+
+        feats = {"sentiment": {"label": "neutral", "score": None}, "sentiment_label": "x", "sentiment_score": 0.1}
+        assert _sentiment(feats) == ("neutral", 0.1)
+
+    def test_sentimento_nao_objeto_usa_plano(self):
+        from graphql_api.datasources.postgres import _sentiment
+
+        assert _sentiment({"sentiment": "positive", "sentiment_label": "positive"}) == ("positive", None)
+
+    def test_sem_sentimento(self):
+        from graphql_api.datasources.postgres import _sentiment
+
+        assert _sentiment({}) == (None, None)
+
+
+class TestTypesenseDocSentimento:
+    @pytest.mark.asyncio
+    async def test_doc_typesense_le_sentimento_aninhado(self):
+        row = {
+            "unique_id": "n-1",
+            "title": "T",
+            "url": "https://gov.br/n-1",
+            "features": {"sentiment": {"label": "positive", "score": 0.6}},
+        }
+        pool, _ = _make_fetch_pool([], fetchrow=row)
+        ds = PostgresDatasource(pool)
+
+        doc = await ds.get_news_for_typesense("n-1")
+
+        assert doc.sentiment_label == "positive"
+        assert doc.sentiment_score == 0.6
+
+    @pytest.mark.asyncio
+    async def test_doc_typesense_cai_para_plano(self):
+        row = {
+            "unique_id": "n-2",
+            "title": "T",
+            "url": "https://gov.br/n-2",
+            "features": {"sentiment_label": "negative", "sentiment_score": -0.3},
+        }
+        pool, _ = _make_fetch_pool([], fetchrow=row)
+        ds = PostgresDatasource(pool)
+
+        doc = await ds.get_news_for_typesense("n-2")
+
+        assert doc.sentiment_label == "negative"
+        assert doc.sentiment_score == -0.3
+
+
+def _flat(sql: str) -> str:
+    return " ".join(sql.split())
+
+
+_NESTED_LABEL = "COALESCE(nf.features->'sentiment'->>'label', nf.features->>'sentiment_label')"
+_NESTED_SCORE = "COALESCE(nf.features->'sentiment'->>'score', nf.features->>'sentiment_score')"
+
+
+class TestSentimentoNasQueries:
+    """agencyAnalytics (MONTH/WEEK e DAY) e entityCoverage leem a chave aninhada com
+    fallback plano; pct_* é a fração dos artigos COM rótulo (NULL sem rótulo)."""
+
+    async def _sql_agency_analytics(self, granularity: str) -> str:
+        pool, conn = _make_fetch_pool([])
+        ds = PostgresDatasource(pool)
+        await ds.agency_analytics(granularity, ["mec"], "2026-09-01", "2026-09-30")
+        return _flat(conn.fetch.await_args.args[0])
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("granularity", ["month", "week", "day"])
+    async def test_agency_analytics_le_chave_aninhada_com_fallback(self, granularity):
+        sql = await self._sql_agency_analytics(granularity)
+        assert _NESTED_LABEL in sql
+        assert _NESTED_SCORE in sql
+        # Sem leitura isolada da chave plana (o bug: features->>'sentiment_score' sozinho).
+        assert "AVG((nf.features->>'sentiment_score')::float)" not in sql
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("granularity", ["month", "day"])
+    async def test_pct_nulo_quando_sem_rotulo(self, granularity):
+        sql = await self._sql_agency_analytics(granularity)
+        # Antes: ELSE 0.0 contava artigo sem rótulo como "não positivo" (pct 0 em vez de NULL).
+        assert "ELSE 0.0" not in sql
+        assert "WHEN s.label = 'positive' THEN 1.0 WHEN s.label IS NOT NULL THEN 0.0 END" in sql
+        assert "WHEN s.label = 'negative' THEN 1.0 WHEN s.label IS NOT NULL THEN 0.0 END" in sql
+
+    @pytest.mark.asyncio
+    async def test_entity_coverage_le_score_aninhado_com_fallback(self):
+        pool, conn = _make_fetch_pool([])
+        ds = PostgresDatasource(pool)
+        await ds.entity_coverage("Q1", "month")
+        sql = _flat(conn.fetch.await_args.args[0])
+        assert _NESTED_SCORE in sql
+        assert "AVG((nf.features->>'sentiment_score')::float)" not in sql
