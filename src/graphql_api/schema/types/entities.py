@@ -52,6 +52,18 @@ class TrendingEntityResult:
     window_count: int
     window_agencies: int
     computed_at: Optional[str]
+    baseline_count: Optional[int] = strawberry.field(
+        default=None,
+        description="Artigos da entidade na janela de baseline. Null em linha gravada antes da migração 029.",
+    )
+    baseline_agencies: Optional[int] = strawberry.field(
+        default=None,
+        description="Agências distintas na janela de baseline. Null em linha gravada antes da migração 029.",
+    )
+    is_new: Optional[bool] = strawberry.field(
+        default=None,
+        description="True quando a entidade não aparece no baseline (baselineCount = 0). Null se o baseline é nulo.",
+    )
 
 
 @strawberry.type

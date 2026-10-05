@@ -476,11 +476,18 @@ _LIST_POLICIES_SQL = """
     LIMIT $3 OFFSET $4
 """
 
+# Só a última execução do DAG `compute_entity_trending`: o UPSERT antigo não
+# apagava entidades que saíram do ranking, e o snapshot misturava execuções de
+# meses diferentes. A igualdade com MAX é segura porque uma execução grava todas
+# as linhas numa única transação (NOW() idêntico). `baseline_*` vêm da migração
+# 029 (NULL em linhas gravadas antes dela).
 _TRENDING_ENTITIES_SQL = """
     SELECT entity_id, canonical_name, type,
            trending_score, volume_ratio, window_count, window_agencies,
+           baseline_count, baseline_agencies,
            computed_at::text
     FROM entity_trending_scores
+    WHERE computed_at = (SELECT MAX(computed_at) FROM entity_trending_scores)
     ORDER BY trending_score DESC
     LIMIT $1
 """
