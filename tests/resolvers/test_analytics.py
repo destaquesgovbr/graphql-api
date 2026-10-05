@@ -188,45 +188,154 @@ async def test_top_agencies():
     assert params["facet_by"] == "agency"
 
 
+_TIMELINE_QUERY = """
+query($days: Int!) {
+    articlesTimeline(range: { days: $days }) {
+        date
+        count
+    }
+}
+"""
+
+
 @pytest.mark.asyncio
 async def test_articles_timeline():
-    ts_mock = _make_ts_mock(
-        {
-            "found": 50,
-            "hits": [],
-            "facet_counts": [
-                {
-                    "field_name": "published_date",
-                    "counts": [
-                        {"value": "2026-03-18", "count": 15},
-                        {"value": "2026-03-17", "count": 20},
-                        {"value": "2026-03-19", "count": 15},
-                    ],
-                }
-            ],
-        }
+    # F0d: série diária vem do Postgres (o facet `published_date` não existe no Typesense).
+    mock_pg = AsyncMock()
+    mock_pg.articles_timeline = AsyncMock(
+        return_value=[
+            {"day": "2026-10-03", "count": 20},
+            {"day": "2026-10-04", "count": 7},
+            {"day": "2026-10-05", "count": 15},
+        ]
     )
 
     result = await test_schema.execute(
-        """
-        query {
-            articlesTimeline(range: { days: 7 }) {
-                date
-                count
-            }
-        }
-        """,
-        context_value=FakeContext(typesense_ds=ts_mock),
+        _TIMELINE_QUERY,
+        variable_values={"days": 3},
+        context_value=FakeContext(postgres_ds=mock_pg),
     )
 
     assert result.errors is None
-    timeline = result.data["articlesTimeline"]
-    assert len(timeline) == 3
-    # Should be sorted by date ascending
-    assert timeline[0]["date"] == "2026-03-17"
-    assert timeline[0]["count"] == 20
-    assert timeline[1]["date"] == "2026-03-18"
-    assert timeline[2]["date"] == "2026-03-19"
+    assert result.data["articlesTimeline"] == [
+        {"date": "2026-10-03", "count": 20},
+        {"date": "2026-10-04", "count": 7},
+        {"date": "2026-10-05", "count": 15},
+    ]
+    mock_pg.articles_timeline.assert_awaited_once_with(3)
+
+
+@pytest.mark.asyncio
+async def test_articles_timeline_nao_usa_typesense():
+    ts_mock = MagicMock()
+    mock_pg = AsyncMock()
+    mock_pg.articles_timeline = AsyncMock(return_value=[])
+
+    result = await test_schema.execute(
+        _TIMELINE_QUERY,
+        variable_values={"days": 7},
+        context_value=FakeContext(typesense_ds=ts_mock, postgres_ds=mock_pg),
+    )
+
+    assert result.errors is None
+    ts_mock.client.collections.__getitem__.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_timeline_preenche_zeros():
+    # Dias sem artigo chegam do SQL com count=0 e são mantidos (não filtrados).
+    mock_pg = AsyncMock()
+    mock_pg.articles_timeline = AsyncMock(
+        return_value=[
+            {"day": "2026-10-11", "count": 0},
+            {"day": "2026-10-12", "count": 0},
+            {"day": "2026-10-13", "count": 9},
+        ]
+    )
+
+    result = await test_schema.execute(
+        _TIMELINE_QUERY,
+        variable_values={"days": 3},
+        context_value=FakeContext(postgres_ds=mock_pg),
+    )
+
+    assert result.errors is None
+    assert [p["count"] for p in result.data["articlesTimeline"]] == [0, 0, 9]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("days, esperado", [(366, 366), (367, 366), (5000, 366), (1, 1)])
+async def test_timeline_clamp_366(days, esperado):
+    mock_pg = AsyncMock()
+    mock_pg.articles_timeline = AsyncMock(return_value=[])
+
+    result = await test_schema.execute(
+        _TIMELINE_QUERY,
+        variable_values={"days": days},
+        context_value=FakeContext(postgres_ds=mock_pg),
+    )
+
+    assert result.errors is None
+    mock_pg.articles_timeline.assert_awaited_once_with(esperado)
+
+
+class TestArticlesTimelineDatasource:
+    """SQL do `PostgresDatasource.articles_timeline` (F0d)."""
+
+    def _make_mock_pool(self, return_rows=None):
+        mock_conn = AsyncMock()
+        mock_conn.fetch = AsyncMock(return_value=return_rows or [])
+        mock_pool = MagicMock()
+        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+        return mock_pool, mock_conn
+
+    async def _sql(self, days: int = 14) -> tuple[str, tuple]:
+        from graphql_api.datasources.postgres import PostgresDatasource
+
+        mock_pool, mock_conn = self._make_mock_pool()
+        await PostgresDatasource(pool=mock_pool).articles_timeline(days)
+        args = mock_conn.fetch.await_args.args
+        return " ".join(args[0].split()), args[1:]
+
+    @pytest.mark.asyncio
+    async def test_timeline_sql_usa_fuso_sp(self):
+        sql, _ = await self._sql()
+        # "Hoje" e o dia de cada artigo são calculados em America/Sao_Paulo (BRT), não em UTC.
+        assert "(NOW() AT TIME ZONE 'America/Sao_Paulo')::date" in sql
+        assert "(n.published_at AT TIME ZONE 'America/Sao_Paulo')::date" in sql
+        assert "published_at::date" not in sql
+
+    @pytest.mark.asyncio
+    async def test_timeline_sql_filtro_sargavel_em_published_at(self):
+        sql, _ = await self._sql()
+        # A coluna fica nua no WHERE (usa o índice de published_at); os limites são
+        # meia-noite BRT convertida para timestamptz.
+        assert "WHERE n.published_at >= " in sql
+        assert "AND n.published_at < " in sql
+        assert "::timestamp AT TIME ZONE 'America/Sao_Paulo'" in sql
+
+    @pytest.mark.asyncio
+    async def test_timeline_sql_preenche_zeros(self):
+        sql, _ = await self._sql()
+        assert "generate_series(" in sql
+        assert "LEFT JOIN" in sql
+        assert "COALESCE(c.cnt, 0)" in sql
+        assert "ORDER BY" in sql
+
+    @pytest.mark.asyncio
+    async def test_timeline_days_parametrizado(self):
+        _, params = await self._sql(14)
+        assert params == (14,)
+
+    @pytest.mark.asyncio
+    async def test_timeline_retorna_dicts(self):
+        from graphql_api.datasources.postgres import PostgresDatasource
+
+        rows = [{"day": "2026-10-04", "count": 0}, {"day": "2026-10-05", "count": 3}]
+        mock_pool, _ = self._make_mock_pool(return_rows=rows)
+        result = await PostgresDatasource(pool=mock_pool).articles_timeline(2)
+        assert result == rows
 
 
 @pytest.mark.asyncio
@@ -282,15 +391,18 @@ async def test_invalid_range_returns_error():
     )
     assert result.errors is not None
 
-    result = await test_schema.execute(
-        """
-        query {
-            articlesTimeline(range: { days: 0 }) { date count }
-        }
-        """,
-        context_value=FakeContext(typesense_ds=ts_mock),
-    )
-    assert result.errors is not None
+    # articlesTimeline (Postgres desde a F0d): valida antes de consultar o datasource.
+    mock_pg = AsyncMock()
+    mock_pg.articles_timeline = AsyncMock(return_value=[])
+    for days in (0, -3):
+        result = await test_schema.execute(
+            _TIMELINE_QUERY,
+            variable_values={"days": days},
+            context_value=FakeContext(typesense_ds=ts_mock, postgres_ds=mock_pg),
+        )
+        assert result.errors is not None
+        assert "greater than 0" in str(result.errors[0])
+    mock_pg.articles_timeline.assert_not_awaited()
 
 
 class TestAgencyAnalytics:
