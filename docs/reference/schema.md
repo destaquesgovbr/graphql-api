@@ -22,8 +22,20 @@ type AgencyPeriodMetrics {
   agencyKey: String!
   agencyName: String
   articleCount: Int!
+
+  """
+  Média do score de sentimento (-1 a 1) dos artigos com score. Null quando nenhum tem.
+  """
   avgSentimentScore: Float
+
+  """
+  Fração (0 a 1) dos artigos COM rótulo de sentimento que são positivos. Null se nenhum tem.
+  """
   pctPositive: Float
+
+  """
+  Fração (0 a 1) dos artigos COM rótulo de sentimento que são negativos. Null se nenhum tem.
+  """
   pctNegative: Float
   avgReadabilityFlesch: Float
   avgWordCount: Float
@@ -551,6 +563,16 @@ type PolicyDetails {
   instanceOf: String
 }
 
+type PolicyListItem {
+  entityId: String!
+  canonicalName: String!
+  domain: String
+  lifecyclePhase: String
+  wikidataId: String
+  aliases: [String!]!
+  articleCount: Int!
+}
+
 input PublishInput {
   name: String!
   description: String = null
@@ -611,7 +633,9 @@ type Query {
   """Top agencies by article count"""
   topAgencies(range: DateRange!, limit: Int! = 8): [AgencyStats!]!
 
-  """Daily article counts for the given date range"""
+  """
+  Contagem diária de artigos nos últimos `range.days` dias de calendário em America/Sao_Paulo (hoje incluso, parcial), em ordem crescente. Dias sem artigo vêm com count 0. `range.days` é limitado a 366.
+  """
   articlesTimeline(range: DateRange!): [DailyCount!]!
 
   """Métricas de publicação por agência e período"""
@@ -738,6 +762,11 @@ type Query {
   """Metadados de ontologia para entidades do tipo POLICY"""
   policyDetails(entityId: String!): PolicyDetails
 
+  """
+  Lista entidades POLICY com metadados de ontologia (domain, lifecycle_phase) e contagem de artigos. Filtros opcionais por domain e lifecyclePhase. PÚBLICO.
+  """
+  policies(domain: String = null, lifecyclePhase: String = null, limit: Int! = 20, offset: Int! = 0): [PolicyListItem!]!
+
   """Entidades NER com maior crescimento de cobertura (pré-computado)"""
   trendingEntities(limit: Int! = 10): [TrendingEntityResult!]!
 }
@@ -841,6 +870,21 @@ type TrendingEntityResult {
   windowCount: Int!
   windowAgencies: Int!
   computedAt: String
+
+  """
+  Artigos da entidade na janela de baseline. Null em linha gravada antes da migração 029.
+  """
+  baselineCount: Int
+
+  """
+  Agências distintas na janela de baseline. Null em linha gravada antes da migração 029.
+  """
+  baselineAgencies: Int
+
+  """
+  True quando a entidade não aparece no baseline (baselineCount = 0). Null se o baseline é nulo.
+  """
+  isNew: Boolean
 }
 
 type TrendingThemeResult {
