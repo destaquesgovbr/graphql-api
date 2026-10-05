@@ -123,3 +123,75 @@ class TestTrendingEntities:
         assert item["windowCount"] == 0
         assert item["windowAgencies"] == 0
         assert item["computedAt"] is None
+
+
+_BASELINE_QUERY = """
+query {
+  trendingEntities(limit: 10) {
+    entityId
+    volumeRatio
+    baselineCount
+    baselineAgencies
+    isNew
+  }
+}
+"""
+
+
+class TestTrendingEntitiesBaseline:
+    """Fase 2.5 (F2): campos aditivos de baseline gravados pelo DAG (migração 029)."""
+
+    @pytest.mark.asyncio
+    async def test_expoe_baseline_count_e_is_new(self):
+        mock_pg = AsyncMock()
+        mock_pg.get_trending_entities = AsyncMock(
+            return_value=[
+                dict(_row(), entity_id="Q1", baseline_count=0, baseline_agencies=0),
+                dict(_row(), entity_id="Q2", baseline_count=14, baseline_agencies=3),
+            ]
+        )
+        result = await test_schema.execute(_BASELINE_QUERY, context_value=_make_ctx(postgres_ds=mock_pg))
+        assert result.errors is None
+        nova, recorrente = result.data["trendingEntities"]
+        assert nova["baselineCount"] == 0
+        assert nova["baselineAgencies"] == 0
+        assert nova["isNew"] is True
+        assert recorrente["baselineCount"] == 14
+        assert recorrente["baselineAgencies"] == 3
+        assert recorrente["isNew"] is False
+
+    @pytest.mark.asyncio
+    async def test_baseline_nulo_em_linha_legada(self):
+        # Linha gravada antes da 029/DP-B: colunas NULL → isNew desconhecido (None), não False.
+        mock_pg = AsyncMock()
+        mock_pg.get_trending_entities = AsyncMock(
+            return_value=[dict(_row(), baseline_count=None, baseline_agencies=None)]
+        )
+        result = await test_schema.execute(_BASELINE_QUERY, context_value=_make_ctx(postgres_ds=mock_pg))
+        assert result.errors is None
+        item = result.data["trendingEntities"][0]
+        assert item["baselineCount"] is None
+        assert item["baselineAgencies"] is None
+        assert item["isNew"] is None
+        # volumeRatio continua não nulo (o portal tipa `number`).
+        assert item["volumeRatio"] == 3.2
+
+    @pytest.mark.asyncio
+    async def test_linha_sem_chaves_de_baseline(self):
+        # Datasource devolvendo dict sem as chaves (ex.: mock antigo) não quebra.
+        mock_pg = AsyncMock()
+        mock_pg.get_trending_entities = AsyncMock(return_value=[_row()])
+        result = await test_schema.execute(_BASELINE_QUERY, context_value=_make_ctx(postgres_ds=mock_pg))
+        assert result.errors is None
+        item = result.data["trendingEntities"][0]
+        assert item["baselineCount"] is None
+        assert item["isNew"] is None
+
+    def test_sdl_campos_de_baseline_sao_opcionais(self):
+        from graphql_api.schema import schema
+
+        sdl = schema.as_str()
+        assert "baselineCount: Int\n" in sdl
+        assert "baselineAgencies: Int\n" in sdl
+        assert "isNew: Boolean\n" in sdl
+        assert "volumeRatio: Float!" in sdl

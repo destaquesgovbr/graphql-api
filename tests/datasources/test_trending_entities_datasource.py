@@ -79,3 +79,36 @@ class TestGetTrendingEntities:
         await ds.get_trending_entities(7)
         args = conn.fetch.await_args.args
         assert args[1] == 7
+
+
+class TestUltimaExecucaoEBaseline:
+    """Fase 2.5 (F2): só a última execução do DAG e colunas de baseline (migração 029)."""
+
+    @pytest.mark.asyncio
+    async def test_sql_filtra_ultima_execucao(self):
+        # O UPSERT do DAG não apagava linhas de execuções antigas: sem o filtro,
+        # o ranking misturava snapshots de meses diferentes.
+        pool, conn = _make_mock_pool([[]])
+        ds = PostgresDatasource(pool)
+        await ds.get_trending_entities(10)
+        sql = conn.fetch.await_args.args[0]
+        assert "MAX(computed_at)" in sql
+        assert "WHERE computed_at = (SELECT MAX(computed_at) FROM entity_trending_scores)" in " ".join(sql.split())
+
+    @pytest.mark.asyncio
+    async def test_sql_seleciona_colunas_de_baseline(self):
+        pool, conn = _make_mock_pool([[]])
+        ds = PostgresDatasource(pool)
+        await ds.get_trending_entities(10)
+        sql = conn.fetch.await_args.args[0]
+        assert "baseline_count" in sql
+        assert "baseline_agencies" in sql
+
+    @pytest.mark.asyncio
+    async def test_mapeia_baseline(self):
+        rows = [dict(_rows()[0], baseline_count=0, baseline_agencies=0)]
+        pool, conn = _make_mock_pool([rows])
+        ds = PostgresDatasource(pool)
+        result = await ds.get_trending_entities(10)
+        assert result[0]["baseline_count"] == 0
+        assert result[0]["baseline_agencies"] == 0
