@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -601,21 +602,56 @@ def _row_to_news_record(row: dict) -> NewsRecord:
     )
 
 
+def _coerce_features(raw: Any) -> dict[str, Any]:
+    """Normaliza `news_features.features` (JSONB) para dict.
+
+    O pool do asyncpg não registra codec de JSONB, então a coluna chega como
+    str → json.loads. Sem linha em `news_features` (LEFT JOIN), JSON inválido
+    ou JSON que não é objeto (`null`, array) viram `{}` (tolerante: um artigo
+    malformado não derruba o lote)."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _as_label(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) else None
+
+
+def _as_score(value: Any) -> Optional[float]:
+    """Score como float, como o `::float` do SQL; inválido (não numérico, bool,
+    NaN/inf) vira None em vez de erro."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        score = float(value)
+    except ValueError:
+        return None
+    return score if math.isfinite(score) else None
+
+
 def _sentiment(features: dict) -> tuple[Optional[str], Optional[float]]:
-    """`(label, score)` do sentimento de `news_features.features`.
+    """`(label, score)` do sentimento de `news_features.features` (já em dict;
+    ver `_coerce_features`).
 
     O enrichment-worker grava aninhado (`sentiment: {label, score}`); as chaves
-    planas `sentiment_label`/`sentiment_score` são legado. Mesma semântica do
-    COALESCE dos SQLs: cada campo usa o aninhado e cai para o plano se for nulo."""
+    planas `sentiment_label`/`sentiment_score` são legado. Mesma precedência do
+    COALESCE dos SQLs: cada campo usa o aninhado e cai para o plano se for nulo.
+    O score sai float (como o `::float` do SQL, aceitando texto numérico); o
+    label só vale se for texto. Valor inválido conta como nulo — onde o SQL
+    levantaria erro no cast, aqui o campo cai para o plano ou fica None."""
     nested = features.get("sentiment")
     if not isinstance(nested, dict):
         nested = {}
-    label = nested.get("label")
+    label = _as_label(nested.get("label"))
     if label is None:
-        label = features.get("sentiment_label")
-    score = nested.get("score")
+        label = _as_label(features.get("sentiment_label"))
+    score = _as_score(nested.get("score"))
     if score is None:
-        score = features.get("sentiment_score")
+        score = _as_score(features.get("sentiment_score"))
     return label, score
 
 
@@ -623,7 +659,7 @@ def _row_to_bigquery_record(row: dict) -> BigQueryRecord:
     tags = row.get("tags") or []
     if isinstance(tags, str):
         tags = [t.strip() for t in tags.split(",") if t.strip()]
-    features = row.get("features") or {}
+    features = _coerce_features(row.get("features"))
     sentiment_label, sentiment_score = _sentiment(features)
     return BigQueryRecord(
         unique_id=row["unique_id"],
@@ -745,7 +781,7 @@ def _row_to_typesense_doc(row: dict) -> TypesenseDocRecord:
     tags = row.get("tags") or []
     if isinstance(tags, str):
         tags = [t.strip() for t in tags.split(",") if t.strip()]
-    features = row.get("features") or {}
+    features = _coerce_features(row.get("features"))
     sentiment_label, sentiment_score = _sentiment(features)
     return TypesenseDocRecord(
         unique_id=row["unique_id"],
