@@ -172,16 +172,27 @@ class EntityQuery:
     ) -> list[TrendingEntityResult]:
         ds = info.context.postgres_ds
         rows = await ds.get_trending_entities(min(limit, 50))
-        return [
-            TrendingEntityResult(
-                entity_id=row["entity_id"],
-                canonical_name=row.get("canonical_name") or "",
-                type=row.get("type") or "",
-                trending_score=float(row.get("trending_score") or 0.0),
-                volume_ratio=float(row.get("volume_ratio") or 0.0),
-                window_count=int(row.get("window_count") or 0),
-                window_agencies=int(row.get("window_agencies") or 0),
-                computed_at=row.get("computed_at"),
-            )
-            for row in rows
-        ]
+        return [_to_trending_entity(row) for row in rows]
+
+
+def _optional_int(value) -> Optional[int]:
+    return None if value is None else int(value)
+
+
+def _to_trending_entity(row: dict) -> TrendingEntityResult:
+    # baseline_* são NULL em linhas anteriores à migração 029: nulo ≠ zero, então
+    # `is_new` só é afirmado quando o baseline é conhecido.
+    baseline_count = _optional_int(row.get("baseline_count"))
+    return TrendingEntityResult(
+        entity_id=row["entity_id"],
+        canonical_name=row.get("canonical_name") or "",
+        type=row.get("type") or "",
+        trending_score=float(row.get("trending_score") or 0.0),
+        volume_ratio=float(row.get("volume_ratio") or 0.0),
+        window_count=int(row.get("window_count") or 0),
+        window_agencies=int(row.get("window_agencies") or 0),
+        computed_at=row.get("computed_at"),
+        baseline_count=baseline_count,
+        baseline_agencies=_optional_int(row.get("baseline_agencies")),
+        is_new=None if baseline_count is None else baseline_count == 0,
+    )

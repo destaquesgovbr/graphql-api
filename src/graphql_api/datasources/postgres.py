@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -323,19 +324,29 @@ LEFT JOIN themes tm ON n.most_specific_theme_id = tm.id
 LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
 """
 
+# Sentimento em `news_features.features`: o enrichment-worker grava aninhado
+# (`sentiment: {label, score}`); `sentiment_label`/`sentiment_score` planos são
+# legado. O LATERAL `s` resolve os dois com COALESCE (aninhado primeiro).
+# `pct_positive`/`pct_negative` = fração dos artigos COM rótulo; NULL quando
+# nenhum artigo do grupo tem rótulo (nulo ≠ zero).
 _AGENCY_ANALYTICS_SQL = """
 SELECT
     DATE_TRUNC($1, n.published_at)::text AS period,
     n.agency_key,
     n.agency_name,
     COUNT(*) AS article_count,
-    AVG((nf.features->>'sentiment_score')::float) AS avg_sentiment_score,
-    AVG(CASE WHEN (nf.features->>'sentiment_label') = 'positive' THEN 1.0 ELSE 0.0 END) AS pct_positive,
-    AVG(CASE WHEN (nf.features->>'sentiment_label') = 'negative' THEN 1.0 ELSE 0.0 END) AS pct_negative,
+    AVG(s.score) AS avg_sentiment_score,
+    AVG(CASE WHEN s.label = 'positive' THEN 1.0 WHEN s.label IS NOT NULL THEN 0.0 END) AS pct_positive,
+    AVG(CASE WHEN s.label = 'negative' THEN 1.0 WHEN s.label IS NOT NULL THEN 0.0 END) AS pct_negative,
     AVG((nf.features->>'readability_flesch')::float) AS avg_readability_flesch,
     AVG((nf.features->>'word_count')::float) AS avg_word_count
 FROM news n
 LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
+CROSS JOIN LATERAL (
+    SELECT
+        COALESCE(nf.features->'sentiment'->>'label', nf.features->>'sentiment_label') AS label,
+        COALESCE(nf.features->'sentiment'->>'score', nf.features->>'sentiment_score')::float AS score
+) s
 WHERE n.agency_key = ANY($2)
   AND n.published_at BETWEEN $3::timestamptz AND $4::timestamptz
 GROUP BY period, n.agency_key, n.agency_name
@@ -343,7 +354,8 @@ ORDER BY period, n.agency_key
 """
 
 # Variante para granularidade DAY: generate_series garante que todos os dias do
-# intervalo aparecem no resultado, mesmo sem artigos (article_count=0).
+# intervalo aparecem no resultado, mesmo sem artigos (article_count=0). O
+# sentimento segue as mesmas regras de `_AGENCY_ANALYTICS_SQL`.
 # Parâmetros: $1=agencies, $2=date_from (date), $3=date_to (date).
 _AGENCY_ANALYTICS_DAY_SQL = """
 WITH date_series AS (
@@ -360,13 +372,18 @@ daily_agg AS (
         n.published_at::date AS day,
         n.agency_key,
         COUNT(*) AS article_count,
-        AVG((nf.features->>'sentiment_score')::float) AS avg_sentiment_score,
-        AVG(CASE WHEN (nf.features->>'sentiment_label') = 'positive' THEN 1.0 ELSE 0.0 END) AS pct_positive,
-        AVG(CASE WHEN (nf.features->>'sentiment_label') = 'negative' THEN 1.0 ELSE 0.0 END) AS pct_negative,
+        AVG(s.score) AS avg_sentiment_score,
+        AVG(CASE WHEN s.label = 'positive' THEN 1.0 WHEN s.label IS NOT NULL THEN 0.0 END) AS pct_positive,
+        AVG(CASE WHEN s.label = 'negative' THEN 1.0 WHEN s.label IS NOT NULL THEN 0.0 END) AS pct_negative,
         AVG((nf.features->>'readability_flesch')::float) AS avg_readability_flesch,
         AVG((nf.features->>'word_count')::float) AS avg_word_count
     FROM news n
     LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
+    CROSS JOIN LATERAL (
+        SELECT
+            COALESCE(nf.features->'sentiment'->>'label', nf.features->>'sentiment_label') AS label,
+            COALESCE(nf.features->'sentiment'->>'score', nf.features->>'sentiment_score')::float AS score
+    ) s
     WHERE n.agency_key = ANY($1)
       AND n.published_at::date BETWEEN $2::date AND $3::date
     GROUP BY n.published_at::date, n.agency_key
@@ -387,9 +404,42 @@ LEFT JOIN daily_agg da ON da.day = ds.day AND da.agency_key = an.agency_key
 ORDER BY ds.day, an.agency_key
 """
 
+# Série diária de artigos da plataforma (articlesTimeline). Dias de calendário em
+# America/Sao_Paulo: os `$1` dias que terminam hoje (BRT), hoje incluso (parcial).
+# O filtro mantém `published_at` nua no WHERE (faixa sargável, usa o índice), com
+# limites = meia-noite BRT convertida para timestamptz; o agrupamento converte
+# cada artigo para o dia BRT. `generate_series` + LEFT JOIN + COALESCE garantem
+# um ponto por dia, com 0 nos dias sem artigo.
+_ARTICLES_TIMELINE_SQL = """
+WITH params AS (
+    SELECT (NOW() AT TIME ZONE 'America/Sao_Paulo')::date AS today
+),
+bounds AS (
+    SELECT today - ($1::int - 1) AS first_day, today AS last_day
+    FROM params
+),
+days AS (
+    SELECT gs::date AS day
+    FROM bounds b,
+         generate_series(b.first_day::timestamp, b.last_day::timestamp, INTERVAL '1 day') AS gs
+),
+counts AS (
+    SELECT (n.published_at AT TIME ZONE 'America/Sao_Paulo')::date AS day, COUNT(*) AS cnt
+    FROM news n
+    WHERE n.published_at >= (SELECT first_day::timestamp AT TIME ZONE 'America/Sao_Paulo' FROM bounds)
+      AND n.published_at < (SELECT (last_day + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo' FROM bounds)
+    GROUP BY 1
+)
+SELECT d.day::text AS day, COALESCE(c.cnt, 0)::int AS count
+FROM days d
+LEFT JOIN counts c ON c.day = d.day
+ORDER BY d.day
+"""
+
 # Série temporal de cobertura de uma entidade por agência e período.
 # `$1` = granularidade (day/week/month), `$2` = entity_id, `$3` = date_from
 # (NULL = sem limite inferior), `$4` = date_to (NULL = sem limite superior).
+# Score de sentimento aninhado com fallback plano (ver `_AGENCY_ANALYTICS_SQL`).
 _ENTITY_COVERAGE_SQL = """
 SELECT
     DATE_TRUNC($1, ne.published_at)::text AS period,
@@ -397,7 +447,7 @@ SELECT
     n.agency_name,
     COUNT(DISTINCT ne.unique_id) AS article_count,
     SUM(ne.count) AS total_mentions,
-    AVG((nf.features->>'sentiment_score')::float) AS avg_sentiment_score
+    AVG(COALESCE(nf.features->'sentiment'->>'score', nf.features->>'sentiment_score')::float) AS avg_sentiment_score
 FROM news_entities ne
 JOIN news n ON ne.unique_id = n.unique_id
 LEFT JOIN news_features nf ON ne.unique_id = nf.unique_id
@@ -476,11 +526,18 @@ _LIST_POLICIES_SQL = """
     LIMIT $3 OFFSET $4
 """
 
+# Só a última execução do DAG `compute_entity_trending`: o UPSERT antigo não
+# apagava entidades que saíram do ranking, e o snapshot misturava execuções de
+# meses diferentes. A igualdade com MAX é segura porque uma execução grava todas
+# as linhas numa única transação (NOW() idêntico). `baseline_*` vêm da migração
+# 029 (NULL em linhas gravadas antes dela).
 _TRENDING_ENTITIES_SQL = """
     SELECT entity_id, canonical_name, type,
            trending_score, volume_ratio, window_count, window_agencies,
+           baseline_count, baseline_agencies,
            computed_at::text
     FROM entity_trending_scores
+    WHERE computed_at = (SELECT MAX(computed_at) FROM entity_trending_scores)
     ORDER BY trending_score DESC
     LIMIT $1
 """
@@ -545,11 +602,65 @@ def _row_to_news_record(row: dict) -> NewsRecord:
     )
 
 
+def _coerce_features(raw: Any) -> dict[str, Any]:
+    """Normaliza `news_features.features` (JSONB) para dict.
+
+    O pool do asyncpg não registra codec de JSONB, então a coluna chega como
+    str → json.loads. Sem linha em `news_features` (LEFT JOIN), JSON inválido
+    ou JSON que não é objeto (`null`, array) viram `{}` (tolerante: um artigo
+    malformado não derruba o lote)."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _as_label(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) else None
+
+
+def _as_score(value: Any) -> Optional[float]:
+    """Score como float, como o `::float` do SQL; inválido (não numérico, bool,
+    NaN/inf) vira None em vez de erro."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        score = float(value)
+    except ValueError:
+        return None
+    return score if math.isfinite(score) else None
+
+
+def _sentiment(features: dict) -> tuple[Optional[str], Optional[float]]:
+    """`(label, score)` do sentimento de `news_features.features` (já em dict;
+    ver `_coerce_features`).
+
+    O enrichment-worker grava aninhado (`sentiment: {label, score}`); as chaves
+    planas `sentiment_label`/`sentiment_score` são legado. Mesma precedência do
+    COALESCE dos SQLs: cada campo usa o aninhado e cai para o plano se for nulo.
+    O score sai float (como o `::float` do SQL, aceitando texto numérico); o
+    label só vale se for texto. Valor inválido conta como nulo — onde o SQL
+    levantaria erro no cast, aqui o campo cai para o plano ou fica None."""
+    nested = features.get("sentiment")
+    if not isinstance(nested, dict):
+        nested = {}
+    label = _as_label(nested.get("label"))
+    if label is None:
+        label = _as_label(features.get("sentiment_label"))
+    score = _as_score(nested.get("score"))
+    if score is None:
+        score = _as_score(features.get("sentiment_score"))
+    return label, score
+
+
 def _row_to_bigquery_record(row: dict) -> BigQueryRecord:
     tags = row.get("tags") or []
     if isinstance(tags, str):
         tags = [t.strip() for t in tags.split(",") if t.strip()]
-    features = row.get("features") or {}
+    features = _coerce_features(row.get("features"))
+    sentiment_label, sentiment_score = _sentiment(features)
     return BigQueryRecord(
         unique_id=row["unique_id"],
         title=row["title"],
@@ -575,8 +686,8 @@ def _row_to_bigquery_record(row: dict) -> BigQueryRecord:
         most_specific_theme_code=row.get("most_specific_theme_code"),
         most_specific_theme_label=row.get("most_specific_theme_label"),
         features=features,
-        sentiment_label=features.get("sentiment_label"),
-        sentiment_score=features.get("sentiment_score"),
+        sentiment_label=sentiment_label,
+        sentiment_score=sentiment_score,
         trending_score=features.get("trending_score"),
         word_count=features.get("word_count"),
         has_image=features.get("has_image"),
@@ -670,7 +781,8 @@ def _row_to_typesense_doc(row: dict) -> TypesenseDocRecord:
     tags = row.get("tags") or []
     if isinstance(tags, str):
         tags = [t.strip() for t in tags.split(",") if t.strip()]
-    features = row.get("features") or {}
+    features = _coerce_features(row.get("features"))
+    sentiment_label, sentiment_score = _sentiment(features)
     return TypesenseDocRecord(
         unique_id=row["unique_id"],
         title=row["title"],
@@ -697,8 +809,8 @@ def _row_to_typesense_doc(row: dict) -> TypesenseDocRecord:
         most_specific_theme_label=row.get("most_specific_theme_label"),
         features=features,
         content_embedding=row.get("content_embedding"),
-        sentiment_label=features.get("sentiment_label"),
-        sentiment_score=features.get("sentiment_score"),
+        sentiment_label=sentiment_label,
+        sentiment_score=sentiment_score,
         trending_score=features.get("trending_score"),
         word_count=features.get("word_count"),
         has_image=features.get("has_image"),
@@ -967,6 +1079,16 @@ class PostgresDatasource:
                     date_from_d,
                     date_to_d,
                 )
+        return [dict(r) for r in rows]
+
+    async def articles_timeline(self, days: int) -> list[dict]:
+        """Contagem diária de artigos dos últimos `days` dias de calendário em
+        America/Sao_Paulo (hoje incluso). Um dict `{day: 'YYYY-MM-DD', count}`
+        por dia, em ordem crescente, com `count=0` nos dias sem artigo.
+
+        `days` chega validado e limitado (1..366) pelo resolver."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(_ARTICLES_TIMELINE_SQL, days)
         return [dict(r) for r in rows]
 
     async def entity_coverage(

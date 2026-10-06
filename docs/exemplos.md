@@ -108,6 +108,12 @@ forma mais rápida de explorar a API.
     }
     ```
 
+    !!! note "`articlesTimeline` vem do Postgres"
+        Um ponto por dia de calendário em `America/Sao_Paulo` (hoje incluso,
+        parcial), em ordem crescente, com `count: 0` nos dias sem artigo;
+        `days` é limitado a 366. Os outros painéis usam facets do Typesense e
+        refletem o atraso de indexação dele.
+
 ## Queries e mutations autenticadas
 
 Exigem `Authorization: Bearer <JWT do Keycloak>`.

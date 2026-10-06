@@ -44,10 +44,21 @@ _HEADER = (
 )
 
 
-def main() -> int:
+def render_sdl() -> str:
+    """SDL do schema Strawberry atual, terminado em newline (conteúdo de `schema.graphql`)."""
     sdl = print_schema(schema)
     if not sdl.endswith("\n"):
         sdl += "\n"
+    return sdl
+
+
+def render_markdown(sdl: str) -> str:
+    """Página MkDocs que embrulha `sdl` num bloco ```graphql (conteúdo de `schema.md`)."""
+    return f"{_HEADER}```graphql\n{sdl}```\n"
+
+
+def main() -> int:
+    sdl = render_sdl()
 
     _REFERENCE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -55,7 +66,7 @@ def main() -> int:
     graphql_path.write_text(sdl, encoding="utf-8")
 
     md_path = _REFERENCE_DIR / "schema.md"
-    md_path.write_text(f"{_HEADER}```graphql\n{sdl}```\n", encoding="utf-8")
+    md_path.write_text(render_markdown(sdl), encoding="utf-8")
 
     print(f"✓ {graphql_path.relative_to(_REFERENCE_DIR.parent.parent)} ({len(sdl.splitlines())} linhas)")
     print(f"✓ {md_path.relative_to(_REFERENCE_DIR.parent.parent)}")

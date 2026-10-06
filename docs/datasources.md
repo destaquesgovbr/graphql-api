@@ -6,7 +6,7 @@ são instanciados no `lifespan` (startup) a partir de env vars e injetados no
 
 | Datasource | Backend | Lib | Modelo | Usado por |
 |-----------|---------|-----|--------|-----------|
-| `PostgresDatasource` | PostgreSQL `govbrnews` | `asyncpg` (pool) | **async** | themes, agencies, news (internal) |
+| `PostgresDatasource` | PostgreSQL `govbrnews` | `asyncpg` (pool) | **async** | themes, agencies, news (internal), `agencyAnalytics`, `articlesTimeline`, entidades (`entityCoverage`, `trendingEntities`) |
 | `TypesenseDatasource` | Typesense | `typesense` | **sync** | articles, search, facets |
 | `TypesenseAdminDatasource` | Typesense | `typesense` | **sync** | writes (indexação, internal) |
 | `FirestoreDatasource` | Firestore | `firebase-admin` | **sync** (wrapped) | clippings, subscriptions, marketplace, users |

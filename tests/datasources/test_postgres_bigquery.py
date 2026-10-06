@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -105,3 +106,86 @@ class TestGetNewsBatchForBigquery:
         call_args = conn.fetch.call_args
         assert "news-004" in call_args[0]
         conn.fetch.assert_awaited_once()
+
+
+class TestSentimentoNoRegistroBigquery:
+    """F0c: o enrichment-worker grava `features.sentiment.{label,score}`; as chaves
+    planas `sentiment_label`/`sentiment_score` são legado (fallback)."""
+
+    @pytest.mark.asyncio
+    async def test_le_sentimento_aninhado(self):
+        row = _sample_row(features={"sentiment": {"label": "negative", "score": -0.4}, "word_count": 120})
+        pool, _ = _make_mock_pool(fetch_result=[row])
+        ds = PostgresDatasource(pool)
+
+        [rec] = await ds.get_news_batch_for_bigquery("2026-09-01", "2026-09-30")
+
+        assert rec.sentiment_label == "negative"
+        assert rec.sentiment_score == -0.4
+        assert rec.word_count == 120
+
+    @pytest.mark.asyncio
+    async def test_cai_para_chaves_planas_legadas(self):
+        row = _sample_row(features={"sentiment_label": "neutral", "sentiment_score": 0.05})
+        pool, _ = _make_mock_pool(fetch_result=[row])
+        ds = PostgresDatasource(pool)
+
+        [rec] = await ds.get_news_batch_for_bigquery("2026-09-01", "2026-09-30")
+
+        assert rec.sentiment_label == "neutral"
+        assert rec.sentiment_score == 0.05
+
+    @pytest.mark.asyncio
+    async def test_aninhado_prevalece_sobre_plano(self):
+        row = _sample_row(
+            features={
+                "sentiment": {"label": "positive", "score": 0.9},
+                "sentiment_label": "negative",
+                "sentiment_score": -0.9,
+            }
+        )
+        pool, _ = _make_mock_pool(fetch_result=[row])
+        ds = PostgresDatasource(pool)
+
+        [rec] = await ds.get_news_batch_for_bigquery("2026-09-01", "2026-09-30")
+
+        assert rec.sentiment_label == "positive"
+        assert rec.sentiment_score == 0.9
+
+    @pytest.mark.asyncio
+    async def test_features_em_str_json_como_o_asyncpg_entrega(self):
+        # O pool não registra codec de JSONB: em produção `features` chega como str.
+        row = _sample_row(features=json.dumps({"sentiment": {"label": "positive", "score": 0.7}, "word_count": 42}))
+        pool, _ = _make_mock_pool(fetch_result=[row])
+        ds = PostgresDatasource(pool)
+
+        [rec] = await ds.get_news_batch_for_bigquery("2026-09-01", "2026-09-30")
+
+        assert rec.sentiment_label == "positive"
+        assert rec.sentiment_score == 0.7
+        assert rec.word_count == 42
+        assert rec.features == {"sentiment": {"label": "positive", "score": 0.7}, "word_count": 42}
+
+    @pytest.mark.asyncio
+    async def test_features_str_json_nao_objeto_vira_vazio(self):
+        # JSONB `null`/array não derruba o lote: tratado como "sem features".
+        row = _sample_row(features="null")
+        pool, _ = _make_mock_pool(fetch_result=[row])
+        ds = PostgresDatasource(pool)
+
+        [rec] = await ds.get_news_batch_for_bigquery("2026-09-01", "2026-09-30")
+
+        assert rec.features == {}
+        assert rec.sentiment_label is None
+        assert rec.sentiment_score is None
+
+    @pytest.mark.asyncio
+    async def test_sem_sentimento_fica_nulo(self):
+        row = _sample_row(features={"word_count": 10})
+        pool, _ = _make_mock_pool(fetch_result=[row])
+        ds = PostgresDatasource(pool)
+
+        [rec] = await ds.get_news_batch_for_bigquery("2026-09-01", "2026-09-30")
+
+        assert rec.sentiment_label is None
+        assert rec.sentiment_score is None
