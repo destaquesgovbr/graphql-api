@@ -314,14 +314,34 @@ class TestArticlesTimelineDatasource:
         assert "WHERE n.published_at >= " in sql
         assert "AND n.published_at < " in sql
         assert "::timestamp AT TIME ZONE 'America/Sao_Paulo'" in sql
+        # Limites exatos (sem Postgres nos testes, fixar o texto é o que pega off-by-one):
+        # inferior inclusivo na meia-noite BRT do primeiro dia; superior exclusivo na
+        # meia-noite BRT do dia seguinte a hoje (hoje incluso, nada de amanhã).
+        assert (
+            "WHERE n.published_at >= (SELECT first_day::timestamp AT TIME ZONE 'America/Sao_Paulo' FROM bounds)"
+        ) in sql
+        assert (
+            "AND n.published_at < (SELECT (last_day + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo' FROM bounds)"
+        ) in sql
+        assert "n.published_at <=" not in sql
+        assert "n.published_at >" not in sql.replace("n.published_at >=", "")
+
+    @pytest.mark.asyncio
+    async def test_timeline_sql_janela_tem_exatamente_days_pontos(self):
+        sql, _ = await self._sql()
+        # [today - (days - 1), today] com passo de 1 dia e extremos inclusivos = `days` pontos,
+        # terminando hoje (BRT).
+        assert "SELECT today - ($1::int - 1) AS first_day, today AS last_day" in sql
+        assert "generate_series(b.first_day::timestamp, b.last_day::timestamp, INTERVAL '1 day')" in sql
+        assert sql.count("$1") == 1
 
     @pytest.mark.asyncio
     async def test_timeline_sql_preenche_zeros(self):
         sql, _ = await self._sql()
         assert "generate_series(" in sql
-        assert "LEFT JOIN" in sql
+        assert "FROM days d LEFT JOIN counts c ON c.day = d.day" in sql
         assert "COALESCE(c.cnt, 0)" in sql
-        assert "ORDER BY" in sql
+        assert sql.rstrip().endswith("ORDER BY d.day")
 
     @pytest.mark.asyncio
     async def test_timeline_days_parametrizado(self):
