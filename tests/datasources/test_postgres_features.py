@@ -307,6 +307,23 @@ class TestSentimentHelper:
 
         assert _sentiment({}) == (None, None)
 
+    def test_score_texto_numerico_vira_float(self):
+        # Como o `::float` do SQL: o score sai float mesmo gravado como texto JSON.
+        from graphql_api.datasources.postgres import _sentiment
+
+        assert _sentiment({"sentiment": {"label": "positive", "score": "0.5"}}) == ("positive", 0.5)
+        assert _sentiment({"sentiment_score": 1}) == (None, 1.0)
+        assert isinstance(_sentiment({"sentiment_score": 1})[1], float)
+
+    def test_valor_invalido_conta_como_nulo_e_cai_para_plano(self):
+        # Onde o SQL levantaria erro no cast, o mapeador trata como nulo (não derruba o lote).
+        from graphql_api.datasources.postgres import _sentiment
+
+        feats = {"sentiment": {"label": 1, "score": "n/a"}, "sentiment_label": "neutral", "sentiment_score": 0.2}
+        assert _sentiment(feats) == ("neutral", 0.2)
+        assert _sentiment({"sentiment_score": True}) == (None, None)
+        assert _sentiment({"sentiment_score": float("nan")}) == (None, None)
+
 
 class TestTypesenseDocSentimento:
     @pytest.mark.asyncio
@@ -340,6 +357,38 @@ class TestTypesenseDocSentimento:
 
         assert doc.sentiment_label == "negative"
         assert doc.sentiment_score == -0.3
+
+    @pytest.mark.asyncio
+    async def test_doc_typesense_features_em_str_json_como_o_asyncpg_entrega(self):
+        # O pool não registra codec de JSONB: em produção `features` chega como str.
+        feats = {"sentiment": {"label": "positive", "score": 0.6}, "word_count": 99}
+        row = {
+            "unique_id": "n-3",
+            "title": "T",
+            "url": "https://gov.br/n-3",
+            "features": json.dumps(feats),
+        }
+        pool, _ = _make_fetch_pool([], fetchrow=row)
+        ds = PostgresDatasource(pool)
+
+        doc = await ds.get_news_for_typesense("n-3")
+
+        assert doc.sentiment_label == "positive"
+        assert doc.sentiment_score == 0.6
+        assert doc.word_count == 99
+        assert doc.features == feats
+
+    @pytest.mark.asyncio
+    async def test_doc_typesense_features_str_json_nao_objeto_vira_vazio(self):
+        row = {"unique_id": "n-4", "title": "T", "url": "https://gov.br/n-4", "features": "[]"}
+        pool, _ = _make_fetch_pool([], fetchrow=row)
+        ds = PostgresDatasource(pool)
+
+        doc = await ds.get_news_for_typesense("n-4")
+
+        assert doc.features == {}
+        assert doc.sentiment_label is None
+        assert doc.sentiment_score is None
 
 
 def _flat(sql: str) -> str:
