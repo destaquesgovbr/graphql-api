@@ -427,6 +427,55 @@ async def test_invalid_range_returns_error():
 
 class TestAgencyAnalytics:
     @pytest.mark.asyncio
+    async def test_metricas_numeric_do_postgres_serializam_como_float(self):
+        """asyncpg devolve AVG(numeric) como Decimal; o GraphQL Float não aceita Decimal."""
+        from decimal import Decimal
+
+        mock_pg = AsyncMock()
+        mock_pg.agency_analytics = AsyncMock(return_value=[
+            {
+                "period": "2026-09",
+                "agency_key": "saude",
+                "agency_name": "Ministério da Saúde",
+                "article_count": 120,
+                "avg_sentiment_score": Decimal("0.7485"),
+                "pct_positive": Decimal("0.6800000000000000"),
+                "pct_negative": Decimal("0.0500000000000000"),
+                "avg_readability_flesch": Decimal("33.5"),
+                "avg_word_count": Decimal("410.25"),
+            },
+            {
+                "period": "2026-10",
+                "agency_key": "saude",
+                "agency_name": "Ministério da Saúde",
+                "article_count": 10,
+                "avg_sentiment_score": None,
+                "pct_positive": None,
+                "pct_negative": None,
+                "avg_readability_flesch": None,
+                "avg_word_count": None,
+            },
+        ])
+        query = """
+        query {
+            agencyAnalytics(agencies: ["saude"] dateFrom: "2026-09-01" dateTo: "2026-10-31" granularity: MONTH) {
+                avgSentimentScore pctPositive pctNegative avgReadabilityFlesch avgWordCount
+            }
+        }
+        """
+        result = await test_schema.execute(query, context_value=FakeContext(postgres_ds=mock_pg))
+        assert result.errors is None
+        first, second = result.data["agencyAnalytics"]
+        assert first == {
+            "avgSentimentScore": 0.7485,
+            "pctPositive": 0.68,
+            "pctNegative": 0.05,
+            "avgReadabilityFlesch": 33.5,
+            "avgWordCount": 410.25,
+        }
+        assert all(v is None for v in second.values())
+
+    @pytest.mark.asyncio
     async def test_retorna_metricas_por_periodo(self):
         mock_pg = AsyncMock()
         mock_pg.agency_analytics = AsyncMock(return_value=[
