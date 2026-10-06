@@ -20,6 +20,14 @@ from graphql_api.schema.types.analytics import (
 _TIMELINE_MAX_DAYS = 366
 
 
+def _as_float(value):
+    """Converte métricas numeric do Postgres (Decimal no asyncpg) para float; None passa.
+
+    O Float do graphql-core 3.3 rejeita Decimal ("Float cannot represent non numeric value").
+    """
+    return None if value is None else float(value)
+
+
 def _extract_facets(response: dict, field_name: str) -> list[dict]:
     """Extract facet counts for a given field from a Typesense response."""
     for fc in response.get("facet_counts", []):
@@ -164,11 +172,11 @@ class AnalyticsQuery:
                 agency_key=row["agency_key"] or "",
                 agency_name=row.get("agency_name"),
                 article_count=int(row["article_count"] or 0),
-                avg_sentiment_score=row.get("avg_sentiment_score"),
-                pct_positive=row.get("pct_positive"),
-                pct_negative=row.get("pct_negative"),
-                avg_readability_flesch=row.get("avg_readability_flesch"),
-                avg_word_count=row.get("avg_word_count"),
+                avg_sentiment_score=_as_float(row.get("avg_sentiment_score")),
+                pct_positive=_as_float(row.get("pct_positive")),
+                pct_negative=_as_float(row.get("pct_negative")),
+                avg_readability_flesch=_as_float(row.get("avg_readability_flesch")),
+                avg_word_count=_as_float(row.get("avg_word_count")),
                 top_themes=[],
             )
             for row in rows
