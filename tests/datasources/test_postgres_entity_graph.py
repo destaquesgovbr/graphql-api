@@ -576,10 +576,12 @@ class TestEntityCoverageConteudoUnico:
         sql = _flat(_ENTITY_COVERAGE_SQL)
         assert "PARTITION BY COALESCE(n.content_hash, ne.unique_id)" in sql
         assert "ORDER BY n.published_at, ne.unique_id" in sql
-        assert "COUNT(DISTINCT m.unique_id) FILTER (WHERE m.is_first) AS unique_content_count" in sql
+        # Uma linha por artigo (PK de news_entities + joins 1:1): COUNT(*) é exato.
+        assert "COUNT(*) FILTER (WHERE m.is_first) AS unique_content_count" in sql
 
     def test_sql_preserva_agregados_existentes(self):
         sql = _flat(_ENTITY_COVERAGE_SQL)
-        assert "COUNT(DISTINCT m.unique_id) AS article_count" in sql
+        assert "COUNT(*) AS article_count" in sql
         assert "SUM(m.count) AS total_mentions" in sql
+        assert "AVG(m.sentiment_score) AS avg_sentiment_score" in sql
         assert "GROUP BY period, m.agency_key, m.agency_name" in sql

@@ -611,21 +611,25 @@ ORDER BY d.day
 # unique_id), só à PRIMEIRA agência que o publicou dentro do intervalo
 # (ROW_NUMBER por published_at, unique_id): republicações não contam de novo e o
 # campo soma entre agências e períodos. `article_count` continua contando artigos.
+# Uma linha por artigo: PK (unique_id, entity_id) em news_entities e joins 1:1
+# com news/news_features, então COUNT(*) = COUNT(DISTINCT unique_id) — e, sem
+# DISTINCT, o agregado pode ser por hash (o sort após a janela era o gargalo).
 # Score de sentimento aninhado com fallback plano (ver `_AGENCY_ANALYTICS_SQL`).
 _ENTITY_COVERAGE_SQL = """
 WITH mentions AS (
     SELECT
         to_char(DATE_TRUNC($1, ne.published_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS"+00"') AS period,
-        ne.unique_id,
         ne.count,
         n.agency_key,
         n.agency_name,
+        COALESCE(nf.features->'sentiment'->>'score', nf.features->>'sentiment_score')::float AS sentiment_score,
         ROW_NUMBER() OVER (
             PARTITION BY COALESCE(n.content_hash, ne.unique_id)
             ORDER BY n.published_at, ne.unique_id
         ) = 1 AS is_first
     FROM news_entities ne
     JOIN news n ON ne.unique_id = n.unique_id
+    LEFT JOIN news_features nf ON ne.unique_id = nf.unique_id
     WHERE ne.entity_id = $2
       AND ($3::date IS NULL OR ne.published_at >= ($3::date)::timestamp AT TIME ZONE 'UTC')
       AND ($4::date IS NULL OR ne.published_at < ($4::date)::timestamp AT TIME ZONE 'UTC')
@@ -634,12 +638,11 @@ SELECT
     m.period,
     m.agency_key,
     m.agency_name,
-    COUNT(DISTINCT m.unique_id) AS article_count,
-    COUNT(DISTINCT m.unique_id) FILTER (WHERE m.is_first) AS unique_content_count,
+    COUNT(*) AS article_count,
+    COUNT(*) FILTER (WHERE m.is_first) AS unique_content_count,
     SUM(m.count) AS total_mentions,
-    AVG(COALESCE(nf.features->'sentiment'->>'score', nf.features->>'sentiment_score')::float) AS avg_sentiment_score
+    AVG(m.sentiment_score) AS avg_sentiment_score
 FROM mentions m
-LEFT JOIN news_features nf ON m.unique_id = nf.unique_id
 GROUP BY period, m.agency_key, m.agency_name
 ORDER BY period
 """
