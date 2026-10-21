@@ -428,6 +428,24 @@ class TestGetEntityNetworkEgo:
         assert ids <= com_aresta
 
     @pytest.mark.asyncio
+    async def test_par_invertido_duplicado_nao_duplica_no_nem_aresta(self):
+        # entity_edges não tem CHECK (src_id < dst_id): a ordem canônica é só
+        # convenção da DAG. Se um par vier nos dois sentidos, a rede continua
+        # com um nó e uma aresta por par (a primeira, de maior peso).
+        node_rows, edge_rows = _ego_rows()
+        node_rows.insert(2, dict(node_rows[1]))  # Q2 repetido
+        edge_rows.insert(1, {"src": "Q2", "dst": "Q1", "weight": 5, "kind": "co_mention"})
+        pool, _ = _make_mock_pool([node_rows, edge_rows])
+        ds = PostgresDatasource(pool)
+
+        net = await ds.get_entity_network("Q1", ego_centered=True)
+
+        assert [n.entity_id for n in net.nodes] == ["Q1", "Q2", "Q3"]
+        pares = [frozenset((e.src, e.dst)) for e in net.edges]
+        assert len(pares) == len(set(pares)) == 3
+        assert next(e for e in net.edges if {e.src, e.dst} == {"Q1", "Q2"}).weight == 40
+
+    @pytest.mark.asyncio
     async def test_empty_entity_id_returns_empty_without_query(self):
         pool, conn = _make_mock_pool([[], []])
         ds = PostgresDatasource(pool)
