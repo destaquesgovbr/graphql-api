@@ -6,7 +6,7 @@ são instanciados no `lifespan` (startup) a partir de env vars e injetados no
 
 | Datasource | Backend | Lib | Modelo | Usado por |
 |-----------|---------|-----|--------|-----------|
-| `PostgresDatasource` | PostgreSQL `govbrnews` | `asyncpg` (pool) | **async** | themes, agencies, news (internal), `agencyAnalytics`, `articlesTimeline`, entidades (`entityCoverage`, `trendingEntities`) |
+| `PostgresDatasource` | PostgreSQL `govbrnews` | `asyncpg` (pool) | **async** | themes, agencies, news (internal), `agencyAnalytics`, `articlesTimeline`, entidades (`entity`, `entityCoverage`, `trendingEntities`, `relatedEntities`, `entityNetwork`, `entityGraphStats`) |
 | `TypesenseDatasource` | Typesense | `typesense` | **sync** | articles, search, facets |
 | `TypesenseAdminDatasource` | Typesense | `typesense` | **sync** | writes (indexação, internal) |
 | `FirestoreDatasource` | Firestore | `firebase-admin` | **sync** (wrapped) | clippings, subscriptions, marketplace, users |
@@ -16,6 +16,16 @@ são instanciados no `lifespan` (startup) a partir de env vars e injetados no
     upstream síncronas. Strawberry lida com resolvers sync **e** async — não force
     `async` onde a lib é síncrona. Datasource ausente no startup vira
     `app.state.<ds> = None` (warning), e o resolver dependente falha em runtime.
+
+!!! warning "Grafo de entidades depende da migração 032 do data-platform"
+    `entity`, `relatedEntities` e `entityNetwork` fazem LEFT JOIN em
+    `entity_stats` e leem `entity_edges.unique_content_count`;
+    `relatedEntities` e `entityGraphStats` leem `entity_graph_meta`. As três
+    estruturas vêm da migração 032 do data-platform: sem ela essas queries
+    falham (tabela/coluna inexistente). Com a migração aplicada mas antes da
+    primeira execução da DAG do grafo, os campos novos (`articleCount`,
+    `uniqueContentCount`, `uniqueContentWeight`, `lift`) ficam nulos e
+    `entityGraphStats` é `null`.
 
 ## Injeção por request
 

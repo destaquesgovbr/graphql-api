@@ -114,6 +114,35 @@ forma mais rápida de explorar a API.
         `days` é limitado a 366. Os outros painéis usam facets do Typesense e
         refletem o atraso de indexação dele.
 
+=== "Entidades"
+
+    ```graphql
+    query Entidade($id: String!) {
+      entity(id: $id) { canonicalName type articleCount uniqueContentCount }
+      # vizinhos com associação acima do acaso (lift), sem co-menções únicas
+      relatedEntities(id: $id, limit: 12, orderBy: LIFT, minWeight: 2) {
+        canonicalId canonicalName weight uniqueContentWeight lift
+      }
+      # rede centrada: a entidade + 30 vizinhos mais fortes, com todas as arestas dela
+      entityNetwork(id: $id, egoCentered: true, maxNodes: 30, limit: 50) {
+        nodes { entityId canonicalName articleCount }
+        edges { src dst weight uniqueContentWeight }
+      }
+      # semana de 01/10 a 07/10 inteira: dateTo é exclusivo
+      entityCoverage(entityId: $id, dateFrom: "2026-10-01", dateTo: "2026-10-08", granularity: DAY) {
+        period agencyKey articleCount uniqueContentCount
+      }
+      entityGraphStats { totalArticles totalUniqueContent computedAt }
+    }
+    ```
+
+    !!! note "Contagens de artigos × de conteúdo"
+        `articleCount`/`weight` contam artigos; uma nota republicada por N
+        órgãos conta N vezes. `uniqueContentCount`/`uniqueContentWeight` contam
+        conteúdos distintos (`content_hash`). No `entityCoverage`, cada
+        conteúdo é creditado só ao primeiro órgão que o publicou no intervalo,
+        então `uniqueContentCount` pode ser somado entre órgãos e períodos.
+
 ## Queries e mutations autenticadas
 
 Exigem `Authorization: Bearer <JWT do Keycloak>`.
@@ -285,3 +314,13 @@ mutation Features($id: String!, $f: JSON!) { upsertFeatures(uniqueId: $id, featu
     - **`cloneMarketplaceListing` retorna `Clipping!`** (precisa de selection set,
       ex.: `{ id name }`) — era `Boolean!` antes de um gap-fix pré-rollout.
     - **`clippings`** (não `myClippings`) é a query de listagem do usuário.
+    - **`entityCoverage` usa dias UTC com `dateTo` exclusivo.** Para incluir o
+      dia D inteiro, mande `dateTo = D + 1`. `period` vem como
+      `"AAAA-MM-DD 00:00:00+00"` (início do período em UTC).
+    - **`entityNetwork` sem `egoCentered` é a rede legada** (CTE recursiva, corte
+      de arestas pelo peso global): as arestas entre vizinhos podem expulsar as
+      da própria entidade. Para uma rede centrada, use `egoCentered: true`.
+    - **`relatedEntities` omite co-menções únicas por padrão** (`minWeight: 2`);
+      `minWeight: 1` devolve a lista completa de antes.
+    - **`ArticleSummary.agencyName` carrega a key** da agência (igual a
+      `agencyKey`), não o nome.
