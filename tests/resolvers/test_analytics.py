@@ -586,6 +586,78 @@ class TestTrendingThemes:
         assert result.errors is not None
 
 
+class TestTrendingThemesTopArticles:
+    """GQL-1: topArticles traz o link do artigo (url) e agencyKey; o Gobus
+    citava artigos sem link."""
+
+    @staticmethod
+    def _ts_mock(calls):
+        ts_mock = MagicMock()
+
+        def _search(params):
+            calls.append(params)
+            if params.get("per_page") == 0:
+                return {
+                    "found": 100,
+                    "facet_counts": [
+                        {"field_name": "theme_1_level_1_label", "counts": [{"value": "Saúde", "count": 21}]}
+                    ],
+                }
+            return {
+                "hits": [
+                    {
+                        "document": {
+                            "unique_id": "a1",
+                            "title": "Vacinação",
+                            "url": "https://www.gov.br/saude/pt-br/a1",
+                            "agency": "saude",
+                            "published_at": 1760000000,
+                            "trending_score": 2.0,
+                        }
+                    },
+                    {"document": {"id": "a2", "title": "Sem url"}},
+                ]
+            }
+
+        ts_mock.client.collections["news"].documents.search.side_effect = _search
+        return ts_mock
+
+    @pytest.mark.asyncio
+    async def test_top_articles_trazem_url_e_agency_key(self):
+        calls = []
+        query = """
+        query {
+            trendingThemes(windowDays: 7 baselineDays: 28) {
+                themeLabel
+                topArticles { uniqueId url agencyKey agencyName }
+            }
+        }
+        """
+        result = await test_schema.execute(query, context_value=FakeContext(typesense_ds=self._ts_mock(calls)))
+        assert result.errors is None
+        top = result.data["trendingThemes"][0]["topArticles"]
+        assert top == [
+            {
+                "uniqueId": "a1",
+                "url": "https://www.gov.br/saude/pt-br/a1",
+                "agencyKey": "saude",
+                "agencyName": "saude",
+            },
+            {"uniqueId": "a2", "url": None, "agencyKey": None, "agencyName": None},
+        ]
+        article_search = calls[-1]
+        assert "url" in article_search["include_fields"].split(",")
+
+    def test_sdl_article_summary(self):
+        sdl = test_schema.as_str()
+        block = sdl.split("type ArticleSummary {", 1)[1].split("}", 1)[0]
+        assert "url: String\n" in block
+        assert "agencyKey: String\n" in block
+        # agencyName continua (compat) e documenta que carrega a key.
+        assert "agencyName: String\n" in block
+        assert "agencyKey" in block.split("agencyName: String", 1)[0]
+
+
 class TestAgencyAnalyticsDayGapFill:
     """Testa que granularity=DAY usa generate_series (gap-fill) e MONTH usa DATE_TRUNC."""
 
