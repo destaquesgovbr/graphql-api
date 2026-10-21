@@ -65,9 +65,22 @@ class AgencyPeriodMetrics:
     pct_negative: Optional[float] = strawberry.field(
         description="Fração (0 a 1) dos artigos COM rótulo de sentimento que são negativos. Null se nenhum tem.",
     )
-    avg_readability_flesch: Optional[float]
+    avg_readability_flesch: Optional[float] = strawberry.field(
+        description="Média do Flesch pela fórmula inglesa (legado; escala distorcida para português).",
+    )
     avg_word_count: Optional[float]
     top_themes: list[ThemeStats]
+    avg_readability_flesch_ptbr: Optional[float] = strawberry.field(
+        default=None,
+        description=(
+            "Média do Flesch adaptado ao português (Martins et al., 1996) dos artigos que o têm. "
+            "Null quando nenhum tem."
+        ),
+    )
+    readability_flesch_ptbr_count: Optional[int] = strawberry.field(
+        default=None,
+        description="Nº de artigos do grupo com Flesch pt-BR calculado (base de avgReadabilityFleschPtbr).",
+    )
 
 
 @strawberry.type

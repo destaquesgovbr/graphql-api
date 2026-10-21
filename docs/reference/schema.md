@@ -37,9 +37,23 @@ type AgencyPeriodMetrics {
   Fração (0 a 1) dos artigos COM rótulo de sentimento que são negativos. Null se nenhum tem.
   """
   pctNegative: Float
+
+  """
+  Média do Flesch pela fórmula inglesa (legado; escala distorcida para português).
+  """
   avgReadabilityFlesch: Float
   avgWordCount: Float
   topThemes: [ThemeStats!]!
+
+  """
+  Média do Flesch adaptado ao português (Martins et al., 1996) dos artigos que o têm. Null quando nenhum tem.
+  """
+  avgReadabilityFleschPtbr: Float
+
+  """
+  Nº de artigos do grupo com Flesch pt-BR calculado (base de avgReadabilityFleschPtbr).
+  """
+  readabilityFleschPtbrCount: Int
 }
 
 """Agency statistics with article count"""
@@ -134,7 +148,16 @@ type ArticleFeatures {
   uniqueSessions: Int
   trendingScore: Float
   wordCount: Int
+
+  """
+  Índice de Flesch pela fórmula inglesa (legado; escala distorcida para português).
+  """
   readabilityFlesch: Float
+
+  """
+  Índice de Flesch adaptado ao português (Martins et al., 1996): 0–100, maior = mais fácil. Null até o artigo ser recalculado.
+  """
+  readabilityFleschPtbr: Float
 }
 
 input ArticleFilter {

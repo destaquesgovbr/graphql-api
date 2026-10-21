@@ -28,6 +28,10 @@ def _as_float(value):
     return None if value is None else float(value)
 
 
+def _as_int(value):
+    return None if value is None else int(value)
+
+
 def _extract_facets(response: dict, field_name: str) -> list[dict]:
     """Extract facet counts for a given field from a Typesense response."""
     for fc in response.get("facet_counts", []):
@@ -178,6 +182,8 @@ class AnalyticsQuery:
                 avg_readability_flesch=_as_float(row.get("avg_readability_flesch")),
                 avg_word_count=_as_float(row.get("avg_word_count")),
                 top_themes=[],
+                avg_readability_flesch_ptbr=_as_float(row.get("avg_readability_flesch_ptbr")),
+                readability_flesch_ptbr_count=_as_int(row.get("readability_flesch_ptbr_count")),
             )
             for row in rows
         ]

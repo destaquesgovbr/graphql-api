@@ -484,6 +484,9 @@ LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
 # legado. O LATERAL `s` resolve os dois com COALESCE (aninhado primeiro).
 # `pct_positive`/`pct_negative` = fração dos artigos COM rótulo; NULL quando
 # nenhum artigo do grupo tem rótulo (nulo ≠ zero).
+# Legibilidade: `readability_flesch` é a fórmula inglesa (legado);
+# `readability_flesch_ptbr` (Martins/1996, GQL-1) vem com a contagem de artigos
+# que o têm, para o consumidor medir a cobertura do backfill.
 _AGENCY_ANALYTICS_SQL = """
 SELECT
     DATE_TRUNC($1, n.published_at)::text AS period,
@@ -494,6 +497,8 @@ SELECT
     AVG(CASE WHEN s.label = 'positive' THEN 1.0 WHEN s.label IS NOT NULL THEN 0.0 END) AS pct_positive,
     AVG(CASE WHEN s.label = 'negative' THEN 1.0 WHEN s.label IS NOT NULL THEN 0.0 END) AS pct_negative,
     AVG((nf.features->>'readability_flesch')::float) AS avg_readability_flesch,
+    AVG((nf.features->>'readability_flesch_ptbr')::float) AS avg_readability_flesch_ptbr,
+    COUNT(nf.features->>'readability_flesch_ptbr') AS readability_flesch_ptbr_count,
     AVG((nf.features->>'word_count')::float) AS avg_word_count
 FROM news n
 LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
@@ -531,6 +536,8 @@ daily_agg AS (
         AVG(CASE WHEN s.label = 'positive' THEN 1.0 WHEN s.label IS NOT NULL THEN 0.0 END) AS pct_positive,
         AVG(CASE WHEN s.label = 'negative' THEN 1.0 WHEN s.label IS NOT NULL THEN 0.0 END) AS pct_negative,
         AVG((nf.features->>'readability_flesch')::float) AS avg_readability_flesch,
+        AVG((nf.features->>'readability_flesch_ptbr')::float) AS avg_readability_flesch_ptbr,
+        COUNT(nf.features->>'readability_flesch_ptbr') AS readability_flesch_ptbr_count,
         AVG((nf.features->>'word_count')::float) AS avg_word_count
     FROM news n
     LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
@@ -552,6 +559,8 @@ SELECT
     da.pct_positive,
     da.pct_negative,
     da.avg_readability_flesch,
+    da.avg_readability_flesch_ptbr,
+    COALESCE(da.readability_flesch_ptbr_count, 0) AS readability_flesch_ptbr_count,
     da.avg_word_count
 FROM date_series ds
 CROSS JOIN agency_names an
