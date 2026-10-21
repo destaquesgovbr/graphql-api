@@ -598,22 +598,40 @@ ORDER BY d.day
 # depender do TimeZone da sessão). `period` é truncado em UTC e formatado como o
 # `timestamptz::text` de uma sessão UTC ("2026-08-27 00:00:00+00"), formato que
 # os consumidores já parseiam.
+# `unique_content_count` credita cada conteúdo, COALESCE(content_hash,
+# unique_id), só à PRIMEIRA agência que o publicou dentro do intervalo
+# (ROW_NUMBER por published_at, unique_id): republicações não contam de novo e o
+# campo soma entre agências e períodos. `article_count` continua contando artigos.
 # Score de sentimento aninhado com fallback plano (ver `_AGENCY_ANALYTICS_SQL`).
 _ENTITY_COVERAGE_SQL = """
+WITH mentions AS (
+    SELECT
+        to_char(DATE_TRUNC($1, ne.published_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS"+00"') AS period,
+        ne.unique_id,
+        ne.count,
+        n.agency_key,
+        n.agency_name,
+        ROW_NUMBER() OVER (
+            PARTITION BY COALESCE(n.content_hash, ne.unique_id)
+            ORDER BY n.published_at, ne.unique_id
+        ) = 1 AS is_first
+    FROM news_entities ne
+    JOIN news n ON ne.unique_id = n.unique_id
+    WHERE ne.entity_id = $2
+      AND ($3::date IS NULL OR ne.published_at >= ($3::date)::timestamp AT TIME ZONE 'UTC')
+      AND ($4::date IS NULL OR ne.published_at < ($4::date)::timestamp AT TIME ZONE 'UTC')
+)
 SELECT
-    to_char(DATE_TRUNC($1, ne.published_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS"+00"') AS period,
-    n.agency_key,
-    n.agency_name,
-    COUNT(DISTINCT ne.unique_id) AS article_count,
-    SUM(ne.count) AS total_mentions,
+    m.period,
+    m.agency_key,
+    m.agency_name,
+    COUNT(DISTINCT m.unique_id) AS article_count,
+    COUNT(DISTINCT m.unique_id) FILTER (WHERE m.is_first) AS unique_content_count,
+    SUM(m.count) AS total_mentions,
     AVG(COALESCE(nf.features->'sentiment'->>'score', nf.features->>'sentiment_score')::float) AS avg_sentiment_score
-FROM news_entities ne
-JOIN news n ON ne.unique_id = n.unique_id
-LEFT JOIN news_features nf ON ne.unique_id = nf.unique_id
-WHERE ne.entity_id = $2
-  AND ($3::date IS NULL OR ne.published_at >= ($3::date)::timestamp AT TIME ZONE 'UTC')
-  AND ($4::date IS NULL OR ne.published_at < ($4::date)::timestamp AT TIME ZONE 'UTC')
-GROUP BY period, n.agency_key, n.agency_name
+FROM mentions m
+LEFT JOIN news_features nf ON m.unique_id = nf.unique_id
+GROUP BY period, m.agency_key, m.agency_name
 ORDER BY period
 """
 
@@ -1377,7 +1395,8 @@ class PostgresDatasource:
           limite); `date_from` inclusivo, `date_to` exclusivo.
 
         Retorna lista de dicts com chaves: `period`, `agency_key`, `agency_name`,
-        `article_count`, `total_mentions`, `avg_sentiment_score`.
+        `article_count`, `unique_content_count`, `total_mentions`,
+        `avg_sentiment_score`.
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(

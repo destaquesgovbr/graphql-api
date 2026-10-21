@@ -26,6 +26,14 @@ class EntityCoveragePoint:
     article_count: int
     total_mentions: int
     avg_sentiment_score: Optional[float]
+    unique_content_count: int = strawberry.field(
+        default=0,
+        description=(
+            "Conteúdos distintos (content_hash) creditados a esta agência: cada conteúdo conta só "
+            "para a primeira agência que o publicou no intervalo consultado, então o campo soma "
+            "entre agências e períodos sem contar republicações. articleCount conta artigos."
+        ),
+    )
 
 
 @strawberry.type

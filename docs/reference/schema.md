@@ -303,6 +303,11 @@ type EntityCoveragePoint {
   articleCount: Int!
   totalMentions: Int!
   avgSentimentScore: Float
+
+  """
+  Conteúdos distintos (content_hash) creditados a esta agência: cada conteúdo conta só para a primeira agência que o publicou no intervalo consultado, então o campo soma entre agências e períodos sem contar republicações. articleCount conta artigos.
+  """
+  uniqueContentCount: Int!
 }
 
 type EntityFacet {

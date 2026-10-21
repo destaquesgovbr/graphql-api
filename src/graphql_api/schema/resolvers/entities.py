@@ -76,6 +76,7 @@ class EntityQuery:
                 article_count=int(row.get("article_count") or 0),
                 total_mentions=int(row.get("total_mentions") or 0),
                 avg_sentiment_score=row.get("avg_sentiment_score"),
+                unique_content_count=int(row.get("unique_content_count") or 0),
             )
             for row in rows
         ]
