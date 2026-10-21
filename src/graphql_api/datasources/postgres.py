@@ -594,10 +594,14 @@ ORDER BY d.day
 # Série temporal de cobertura de uma entidade por agência e período.
 # `$1` = granularidade (day/week/month), `$2` = entity_id, `$3` = date_from
 # (NULL = sem limite inferior), `$4` = date_to (NULL = sem limite superior).
+# Dias UTC: `$3` inclusivo e `$4` EXCLUSIVO (meia-noite UTC de cada data, sem
+# depender do TimeZone da sessão). `period` é truncado em UTC e formatado como o
+# `timestamptz::text` de uma sessão UTC ("2026-08-27 00:00:00+00"), formato que
+# os consumidores já parseiam.
 # Score de sentimento aninhado com fallback plano (ver `_AGENCY_ANALYTICS_SQL`).
 _ENTITY_COVERAGE_SQL = """
 SELECT
-    DATE_TRUNC($1, ne.published_at)::text AS period,
+    to_char(DATE_TRUNC($1, ne.published_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS"+00"') AS period,
     n.agency_key,
     n.agency_name,
     COUNT(DISTINCT ne.unique_id) AS article_count,
@@ -607,8 +611,8 @@ FROM news_entities ne
 JOIN news n ON ne.unique_id = n.unique_id
 LEFT JOIN news_features nf ON ne.unique_id = nf.unique_id
 WHERE ne.entity_id = $2
-  AND ($3::timestamptz IS NULL OR ne.published_at >= $3::timestamptz)
-  AND ($4::timestamptz IS NULL OR ne.published_at <= $4::timestamptz)
+  AND ($3::date IS NULL OR ne.published_at >= ($3::date)::timestamp AT TIME ZONE 'UTC')
+  AND ($4::date IS NULL OR ne.published_at < ($4::date)::timestamp AT TIME ZONE 'UTC')
 GROUP BY period, n.agency_key, n.agency_name
 ORDER BY period
 """
@@ -1369,7 +1373,8 @@ class PostgresDatasource:
         Parâmetros:
         - `entity_id`: QID Wikidata ou `dgb_<ulid>` da entidade.
         - `granularity`: resolução temporal — `day`, `week` ou `month` (padrão).
-        - `date_from`/`date_to`: filtros de data ISO 8601 (None = sem limite).
+        - `date_from`/`date_to`: datas ISO `AAAA-MM-DD` em dias UTC (None = sem
+          limite); `date_from` inclusivo, `date_to` exclusivo.
 
         Retorna lista de dicts com chaves: `period`, `agency_key`, `agency_name`,
         `article_count`, `total_mentions`, `avg_sentiment_score`.

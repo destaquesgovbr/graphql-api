@@ -50,7 +50,14 @@ def _news_record_to_article(record) -> Article:
 
 @strawberry.type
 class EntityQuery:
-    @strawberry.field(description="Série temporal de cobertura de uma entidade por agência")
+    @strawberry.field(
+        description=(
+            "Série temporal de cobertura de uma entidade por agência. `dateFrom`/`dateTo` "
+            "(AAAA-MM-DD, opcionais) em dias UTC; dateFrom inclusivo, dateTo exclusivo: para "
+            "incluir o dia D inteiro, passe dateTo = D + 1. `period` é o início do período em "
+            "UTC (\"AAAA-MM-DD 00:00:00+00\")."
+        )
+    )
     async def entity_coverage(
         self,
         info: Info,

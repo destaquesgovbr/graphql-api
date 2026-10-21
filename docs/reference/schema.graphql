@@ -776,7 +776,9 @@ type Query {
   """
   estimateRecorteCount(themes: [String!]!, agencies: [String!]!, keywords: [String!]!, sinceHours: Int! = 24): Int!
 
-  """Série temporal de cobertura de uma entidade por agência"""
+  """
+  Série temporal de cobertura de uma entidade por agência. `dateFrom`/`dateTo` (AAAA-MM-DD, opcionais) em dias UTC; dateFrom inclusivo, dateTo exclusivo: para incluir o dia D inteiro, passe dateTo = D + 1. `period` é o início do período em UTC ("AAAA-MM-DD 00:00:00+00").
+  """
   entityCoverage(entityId: String!, dateFrom: String = null, dateTo: String = null, granularity: Granularity! = MONTH): [EntityCoveragePoint!]!
 
   """Busca fuzzy de entidades por nome ou alias"""
