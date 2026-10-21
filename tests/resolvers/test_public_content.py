@@ -14,6 +14,7 @@ import strawberry
 from graphql_api.context import GraphQLContext, User
 from graphql_api.datasources.firestore import ClippingData, ReleaseData, SubscriptionData
 from graphql_api.datasources.postgres import (
+    EntityGraphStatsRecord,
     EntityNetworkEdgeRecord,
     EntityNetworkNodeRecord,
     EntityNetworkRecord,
@@ -623,7 +624,37 @@ class TestSDL:
         assert "wikidataId: String" in block
         assert "weight: Int!" in block
         assert "kind: String!" in block
-        assert "relatedEntities(id: String!, limit: Int! = 12): [RelatedEntity!]!" in sdl
+        assert (
+            "relatedEntities(id: String!, limit: Int! = 12, "
+            "orderBy: RelatedEntityOrder! = WEIGHT, minWeight: Int! = 2): [RelatedEntity!]!"
+            in sdl
+        )
+
+    def test_related_entity_stats_fields_and_order_enum(self):
+        # GQL-1: estatísticas nullable + ordenação por peso, conteúdo único ou lift.
+        sdl = test_schema.as_str()
+        block = sdl.split("type RelatedEntity {", 1)[1].split("}", 1)[0]
+        for field in (
+            "articleCount: Int",
+            "uniqueContentCount: Int",
+            "uniqueContentWeight: Int",
+            "lift: Float",
+        ):
+            assert field in block
+            assert field + "!" not in block
+        enum_block = sdl.split("enum RelatedEntityOrder {", 1)[1].split("}", 1)[0]
+        assert enum_block.split() == ["WEIGHT", "UNIQUE_CONTENT", "LIFT"]
+
+    def test_entity_node_stats_and_graph_stats(self):
+        sdl = test_schema.as_str()
+        block = sdl.split("type EntityNode {", 1)[1].split("}", 1)[0]
+        assert "articleCount: Int" in block
+        assert "uniqueContentCount: Int" in block
+        gblock = sdl.split("type EntityGraphStats {", 1)[1].split("}", 1)[0]
+        assert "totalArticles: Int!" in gblock
+        assert "totalUniqueContent: Int!" in gblock
+        assert "computedAt: DateTime" in gblock
+        assert "entityGraphStats: EntityGraphStats\n" in sdl
 
     def test_entity_network_types_and_query_signature(self):
         sdl = test_schema.as_str()
@@ -730,7 +761,9 @@ class TestRelatedEntities:
                 "kind": "co_mention",
             },
         ]
-        pg.get_related_entities.assert_awaited_once_with("Q123", limit=12)
+        pg.get_related_entities.assert_awaited_once_with(
+            "Q123", limit=12, order_by="weight", min_weight=2
+        )
 
     @pytest.mark.asyncio
     async def test_default_limit(self):
@@ -739,7 +772,66 @@ class TestRelatedEntities:
         query = "{ relatedEntities(id: \"Q1\") { canonicalId } }"
         result = await test_schema.execute(query, context_value=_ctx(postgres_ds=pg))
         assert result.errors is None, f"Errors: {result.errors}"
-        pg.get_related_entities.assert_awaited_once_with("Q1", limit=12)
+        pg.get_related_entities.assert_awaited_once_with(
+            "Q1", limit=12, order_by="weight", min_weight=2
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("order_by", "valor"),
+        [("WEIGHT", "weight"), ("UNIQUE_CONTENT", "unique_content"), ("LIFT", "lift")],
+    )
+    async def test_repassa_order_by_e_min_weight(self, order_by, valor):
+        pg = MagicMock()
+        pg.get_related_entities = AsyncMock(return_value=[])
+        query = (
+            f'{{ relatedEntities(id: "Q1", limit: 5, orderBy: {order_by}, minWeight: 3) '
+            "{ canonicalId } }"
+        )
+        result = await test_schema.execute(query, context_value=_ctx(postgres_ds=pg))
+        assert result.errors is None, f"Errors: {result.errors}"
+        pg.get_related_entities.assert_awaited_once_with(
+            "Q1", limit=5, order_by=valor, min_weight=3
+        )
+
+    @pytest.mark.asyncio
+    async def test_mapeia_stats_e_lift_nulos(self):
+        pg = MagicMock()
+        pg.get_related_entities = AsyncMock(
+            return_value=[
+                RelatedEntityRecord(
+                    entity_id="Q2",
+                    weight=40,
+                    article_count=900,
+                    unique_content_count=700,
+                    unique_content_weight=31,
+                    lift=2.5,
+                ),
+                RelatedEntityRecord(entity_id="Q3", weight=3),
+            ]
+        )
+        query = (
+            '{ relatedEntities(id: "Q1", orderBy: LIFT) '
+            "{ canonicalId articleCount uniqueContentCount uniqueContentWeight lift } }"
+        )
+        result = await test_schema.execute(query, context_value=_ctx(postgres_ds=pg))
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["relatedEntities"] == [
+            {
+                "canonicalId": "Q2",
+                "articleCount": 900,
+                "uniqueContentCount": 700,
+                "uniqueContentWeight": 31,
+                "lift": 2.5,
+            },
+            {
+                "canonicalId": "Q3",
+                "articleCount": None,
+                "uniqueContentCount": None,
+                "uniqueContentWeight": None,
+                "lift": None,
+            },
+        ]
 
     @pytest.mark.asyncio
     async def test_empty_without_postgres(self):
@@ -1110,3 +1202,71 @@ class TestEntity:
         )
         assert result.errors is None, f"Errors: {result.errors}"
         assert result.data["entity"] is None
+
+
+# ---------------------------------------------------------------------------
+# entity(id) com estatísticas + entityGraphStats (GQL-1)
+# ---------------------------------------------------------------------------
+class TestEntityStats:
+    @pytest.mark.asyncio
+    async def test_entity_expoe_article_count_e_unique_content_count(self):
+        pg = MagicMock()
+        pg.get_entity = AsyncMock(
+            return_value=EntityRegistryRecord(
+                entity_id="Q1", article_count=1200, unique_content_count=950
+            )
+        )
+        query = '{ entity(id: "Q1") { entityId articleCount uniqueContentCount } }'
+        result = await test_schema.execute(query, context_value=_ctx(postgres_ds=pg))
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["entity"] == {
+            "entityId": "Q1",
+            "articleCount": 1200,
+            "uniqueContentCount": 950,
+        }
+
+    @pytest.mark.asyncio
+    async def test_entity_sem_stats_nulos(self):
+        pg = MagicMock()
+        pg.get_entity = AsyncMock(return_value=EntityRegistryRecord(entity_id="Q1"))
+        query = '{ entity(id: "Q1") { articleCount uniqueContentCount } }'
+        result = await test_schema.execute(query, context_value=_ctx(postgres_ds=pg))
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["entity"] == {"articleCount": None, "uniqueContentCount": None}
+
+
+GRAPH_STATS_QUERY = "{ entityGraphStats { totalArticles totalUniqueContent computedAt } }"
+
+
+class TestEntityGraphStats:
+    @pytest.mark.asyncio
+    async def test_retorna_meta(self):
+        pg = MagicMock()
+        pg.get_entity_graph_stats = AsyncMock(
+            return_value=EntityGraphStatsRecord(
+                total_articles=333000,
+                total_unique_content=250000,
+                computed_at=datetime(2026, 10, 20, 3, 0, tzinfo=timezone.utc),
+            )
+        )
+        result = await test_schema.execute(GRAPH_STATS_QUERY, context_value=_ctx(postgres_ds=pg))
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["entityGraphStats"] == {
+            "totalArticles": 333000,
+            "totalUniqueContent": 250000,
+            "computedAt": "2026-10-20T03:00:00+00:00",
+        }
+
+    @pytest.mark.asyncio
+    async def test_null_sem_meta(self):
+        pg = MagicMock()
+        pg.get_entity_graph_stats = AsyncMock(return_value=None)
+        result = await test_schema.execute(GRAPH_STATS_QUERY, context_value=_ctx(postgres_ds=pg))
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["entityGraphStats"] is None
+
+    @pytest.mark.asyncio
+    async def test_null_sem_postgres(self):
+        result = await test_schema.execute(GRAPH_STATS_QUERY, context_value=_ctx())
+        assert result.errors is None, f"Errors: {result.errors}"
+        assert result.data["entityGraphStats"] is None

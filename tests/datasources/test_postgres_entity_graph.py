@@ -5,6 +5,8 @@ recursiva, clamp de depth). Mock do pool asyncpg — verifica que o `entity_id`
 vai SEMPRE parametrizado ($1), o clamp de depth e o mapeamento das linhas.
 """
 
+from datetime import datetime, timezone
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -14,6 +16,9 @@ from graphql_api.datasources.postgres import (
     _ENTITY_NETWORK_EGO_EDGES_SQL,
     _ENTITY_NETWORK_EGO_NODES_SQL,
     _ENTITY_NETWORK_NODES_SQL,
+    _ENTITY_REGISTRY_SQL,
+    _RELATED_ENTITIES_SQL,
+    EntityGraphStatsRecord,
     EntityNetworkEdgeRecord,
     EntityNetworkNodeRecord,
     PostgresDatasource,
@@ -25,16 +30,18 @@ def _flat(sql: str) -> str:
     return " ".join(sql.split())
 
 
-def _make_mock_pool(fetch_results=None):
+def _make_mock_pool(fetch_results=None, *, fetchrow=None):
     """Pool com conn.fetch retornando, em sequência, cada item de
     `fetch_results` (lista de listas de rows). Útil quando o método faz
-    múltiplas queries (network: nós + arestas)."""
+    múltiplas queries (network: nós + arestas). `fetchrow` define o retorno
+    de `conn.fetchrow` (linha única)."""
     pool = MagicMock()
     conn = AsyncMock()
     if fetch_results is None:
         conn.fetch = AsyncMock(return_value=[])
     else:
         conn.fetch = AsyncMock(side_effect=list(fetch_results))
+    conn.fetchrow = AsyncMock(return_value=fetchrow)
 
     acm = AsyncMock()
     acm.__aenter__ = AsyncMock(return_value=conn)
@@ -87,6 +94,101 @@ class TestGetRelatedEntities:
         result = await ds.get_related_entities("", limit=12)
         assert result == []
         conn.fetch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_defaults_ordem_por_peso_e_peso_minimo_2(self):
+        pool, conn = _make_mock_pool([[]])
+        ds = PostgresDatasource(pool)
+
+        await ds.get_related_entities("Q123")
+
+        # $1 = entity_id, $2 = limit, $3 = ordenação, $4 = peso mínimo.
+        assert conn.fetch.await_args.args == (_RELATED_ENTITIES_SQL, "Q123", 12, "weight", 2)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("order_by", ["weight", "unique_content", "lift"])
+    async def test_repassa_ordenacao(self, order_by):
+        pool, conn = _make_mock_pool([[]])
+        ds = PostgresDatasource(pool)
+
+        await ds.get_related_entities("Q123", limit=5, order_by=order_by, min_weight=3)
+
+        assert conn.fetch.await_args.args[1:] == ("Q123", 5, order_by, 3)
+
+    @pytest.mark.asyncio
+    async def test_ordenacao_invalida_levanta_sem_query(self):
+        pool, conn = _make_mock_pool([[]])
+        ds = PostgresDatasource(pool)
+
+        with pytest.raises(ValueError):
+            await ds.get_related_entities("Q123", order_by="weight; DROP TABLE x")
+        conn.fetch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("min_weight", "esperado"), [(0, 1), (-5, 1), (1, 1), (7, 7)])
+    async def test_clampa_peso_minimo(self, min_weight, esperado):
+        pool, conn = _make_mock_pool([[]])
+        ds = PostgresDatasource(pool)
+
+        await ds.get_related_entities("Q123", min_weight=min_weight)
+
+        assert conn.fetch.await_args.args[4] == esperado
+
+    @pytest.mark.asyncio
+    async def test_mapeia_stats_e_lift_com_nulos(self):
+        rows = [
+            {
+                "other_id": "Q2",
+                "weight": 40,
+                "kind": "co_mention",
+                "canonical_name": "MCTI",
+                "type": "ORG",
+                "wikidata_id": "Q2",
+                "article_count": 900,
+                "unique_content_count": 700,
+                "unique_content_weight": 31,
+                # float8 do Postgres; Decimal por garantia (graphql-core 3.3 rejeita).
+                "lift": Decimal("2.5"),
+            },
+            {
+                "other_id": "Q3",
+                "weight": 3,
+                "kind": "co_mention",
+                "canonical_name": "Sem stats",
+                "type": "ORG",
+                "wikidata_id": None,
+                "article_count": None,
+                "unique_content_count": None,
+                "unique_content_weight": None,
+                "lift": None,
+            },
+        ]
+        pool, _ = _make_mock_pool([rows])
+        ds = PostgresDatasource(pool)
+
+        a, b = await ds.get_related_entities("Q1", order_by="lift")
+
+        assert (a.article_count, a.unique_content_count, a.unique_content_weight) == (900, 700, 31)
+        assert a.lift == 2.5
+        assert isinstance(a.lift, float)
+        assert (b.article_count, b.unique_content_count, b.unique_content_weight, b.lift) == (
+            None,
+            None,
+            None,
+            None,
+        )
+
+    def test_sql_lift_nulo_sem_stats_e_ordem_com_nulls_last(self):
+        sql = _flat(_RELATED_ENTITIES_SQL)
+        assert "e.weight >= $4" in sql
+        assert "LEFT JOIN entity_stats" in sql
+        assert "LEFT JOIN entity_graph_meta" in sql
+        # lift = weight·N/(cnt_ego·cnt_nbr), NULL se qualquer termo faltar ou for 0.
+        assert "NULLIF(m.total_articles, 0)" in sql
+        assert "NULLIF(se.article_count, 0)" in sql
+        assert "NULLIF(so.article_count, 0)" in sql
+        assert "DESC NULLS LAST" in sql
+        assert sql.endswith("weight DESC, other_id ASC LIMIT $2")
 
 
 class TestGetEntityNetwork:
@@ -332,3 +434,67 @@ class TestGetEntityNetworkEgo:
         assert net.nodes == []
         assert net.edges == []
         conn.fetch.assert_not_awaited()
+
+
+class TestGetEntityStats:
+    def test_entity_registry_sql_junta_entity_stats(self):
+        sql = _flat(_ENTITY_REGISTRY_SQL)
+        assert "LEFT JOIN entity_stats s ON s.entity_id = r.entity_id" in sql
+        assert "s.article_count AS article_count" in sql
+        assert "s.unique_content_count AS unique_content_count" in sql
+
+    @pytest.mark.asyncio
+    async def test_get_entity_mapeia_stats(self):
+        row = {
+            "entity_id": "Q1",
+            "canonical_name": "Finep",
+            "type": "ORG",
+            "aliases": "[]",
+            "wikidata_id": "Q1",
+            "wikidata_url": None,
+            "description": None,
+            "agency_key": None,
+            "article_count": 1200,
+            "unique_content_count": 950,
+        }
+        pool, conn = _make_mock_pool(fetchrow=row)
+        ds = PostgresDatasource(pool)
+
+        rec = await ds.get_entity("Q1")
+
+        assert (rec.article_count, rec.unique_content_count) == (1200, 950)
+        assert conn.fetchrow.await_args.args == (_ENTITY_REGISTRY_SQL, "Q1")
+
+    @pytest.mark.asyncio
+    async def test_get_entity_sem_stats(self):
+        row = {"entity_id": "Q1", "article_count": None, "unique_content_count": None}
+        pool, _ = _make_mock_pool(fetchrow=row)
+        ds = PostgresDatasource(pool)
+
+        rec = await ds.get_entity("Q1")
+
+        assert rec.article_count is None
+        assert rec.unique_content_count is None
+
+
+class TestGetEntityGraphStats:
+    @pytest.mark.asyncio
+    async def test_mapeia_meta(self):
+        computed = datetime(2026, 10, 20, 3, 0, tzinfo=timezone.utc)
+        row = {"total_articles": 333000, "total_unique_content": 250000, "computed_at": computed}
+        pool, conn = _make_mock_pool(fetchrow=row)
+        ds = PostgresDatasource(pool)
+
+        stats = await ds.get_entity_graph_stats()
+
+        assert stats == EntityGraphStatsRecord(
+            total_articles=333000, total_unique_content=250000, computed_at=computed
+        )
+        assert "FROM entity_graph_meta" in conn.fetchrow.await_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_none_sem_linha(self):
+        pool, _ = _make_mock_pool(fetchrow=None)
+        ds = PostgresDatasource(pool)
+
+        assert await ds.get_entity_graph_stats() is None
