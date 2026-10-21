@@ -372,9 +372,9 @@ class PublicContentQuery:
             "Entidades relacionadas a `id` (entity_id) por co-menção (Fase 6c). "
             "Lê a rede de co-menção materializada (`entity_edges`, 1-hop), "
             "retorna os vizinhos hidratados do entity_registry com weight >= "
-            "`minWeight` (mínimo 1), ordenados por `orderBy` (default WEIGHT = nº "
-            "de artigos em co-menção) desc, até `limit`. Retorna [] sem Postgres "
-            "ou sem vizinhos. PÚBLICO."
+            "`minWeight` (default 1 = todos; 2 descarta co-menções únicas), "
+            "ordenados por `orderBy` (default WEIGHT = nº de artigos em co-menção) "
+            "desc, até `limit`. Retorna [] sem Postgres ou sem vizinhos. PÚBLICO."
         )
     )
     async def related_entities(
@@ -383,7 +383,7 @@ class PublicContentQuery:
         id: str,
         limit: int = 12,
         order_by: RelatedEntityOrder = RelatedEntityOrder.WEIGHT,
-        min_weight: int = 2,
+        min_weight: int = 1,
     ) -> list[RelatedEntity]:
         ctx = info.context
         pg = ctx.postgres_ds

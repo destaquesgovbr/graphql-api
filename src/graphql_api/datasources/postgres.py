@@ -1185,7 +1185,7 @@ class PostgresDatasource:
         entity_id: str,
         limit: int = 12,
         order_by: str = "weight",
-        min_weight: int = 2,
+        min_weight: int = 1,
     ) -> list[RelatedEntityRecord]:
         """Vizinhos 1-hop de `entity_id` na rede de co-menção (Fase 6c).
 
@@ -1193,8 +1193,9 @@ class PostgresDatasource:
         ponta, pega a "outra ponta" e junta com `entity_registry` para hidratar
         nome/tipo/wikidata, e com `entity_stats`/`entity_graph_meta` para as
         estatísticas e o lift (GQL-1). Só arestas com weight >= `min_weight`
-        (mínimo 1). `order_by`: 'weight' (default), 'unique_content' ou 'lift'
-        (nulos por último; desempate weight desc). Até `limit`. `entity_id`
+        (mínimo 1; o default 1 é a lista legada). `order_by`: 'weight'
+        (default), 'unique_content' ou 'lift' (nulos por último; desempate
+        weight desc). Até `limit`. `entity_id`
         sempre parametrizado ($1) — nunca interpolado (anti-injection)."""
         if order_by not in _RELATED_ENTITY_ORDERS:
             raise ValueError(f"order_by inválido: {order_by!r}")

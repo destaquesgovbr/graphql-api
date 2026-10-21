@@ -320,7 +320,8 @@ mutation Features($id: String!, $f: JSON!) { upsertFeatures(uniqueId: $id, featu
     - **`entityNetwork` sem `egoCentered` é a rede legada** (CTE recursiva, corte
       de arestas pelo peso global): as arestas entre vizinhos podem expulsar as
       da própria entidade. Para uma rede centrada, use `egoCentered: true`.
-    - **`relatedEntities` omite co-menções únicas por padrão** (`minWeight: 2`);
-      `minWeight: 1` devolve a lista completa de antes.
+    - **`relatedEntities` inclui co-menções únicas por padrão** (`minWeight: 1`,
+      a lista de sempre); `minWeight: 2` corta esse ruído. Já `entityNetwork`
+      com `egoCentered: true` usa sempre weight ≥ 2.
     - **`ArticleSummary.agencyName` carrega a key** da agência (igual a
       `agencyKey`), não o nome.

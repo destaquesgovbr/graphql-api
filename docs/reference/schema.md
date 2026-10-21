@@ -796,9 +796,9 @@ type Query {
   entity(id: String!): EntityNode
 
   """
-  Entidades relacionadas a `id` (entity_id) por co-menção (Fase 6c). Lê a rede de co-menção materializada (`entity_edges`, 1-hop), retorna os vizinhos hidratados do entity_registry com weight >= `minWeight` (mínimo 1), ordenados por `orderBy` (default WEIGHT = nº de artigos em co-menção) desc, até `limit`. Retorna [] sem Postgres ou sem vizinhos. PÚBLICO.
+  Entidades relacionadas a `id` (entity_id) por co-menção (Fase 6c). Lê a rede de co-menção materializada (`entity_edges`, 1-hop), retorna os vizinhos hidratados do entity_registry com weight >= `minWeight` (default 1 = todos; 2 descarta co-menções únicas), ordenados por `orderBy` (default WEIGHT = nº de artigos em co-menção) desc, até `limit`. Retorna [] sem Postgres ou sem vizinhos. PÚBLICO.
   """
-  relatedEntities(id: String!, limit: Int! = 12, orderBy: RelatedEntityOrder! = WEIGHT, minWeight: Int! = 2): [RelatedEntity!]!
+  relatedEntities(id: String!, limit: Int! = 12, orderBy: RelatedEntityOrder! = WEIGHT, minWeight: Int! = 1): [RelatedEntity!]!
 
   """
   Totais do grafo de entidades (entity_graph_meta): artigos e conteúdos distintos considerados e quando foram calculados. Null sem Postgres ou antes da primeira execução da DAG do grafo. PÚBLICO.
