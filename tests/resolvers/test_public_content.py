@@ -626,7 +626,7 @@ class TestSDL:
         assert "kind: String!" in block
         assert (
             "relatedEntities(id: String!, limit: Int! = 12, "
-            "orderBy: RelatedEntityOrder! = WEIGHT, minWeight: Int! = 2): [RelatedEntity!]!"
+            "orderBy: RelatedEntityOrder! = WEIGHT, minWeight: Int! = 1): [RelatedEntity!]!"
             in sdl
         )
 
@@ -762,7 +762,7 @@ class TestRelatedEntities:
             },
         ]
         pg.get_related_entities.assert_awaited_once_with(
-            "Q123", limit=12, order_by="weight", min_weight=2
+            "Q123", limit=12, order_by="weight", min_weight=1
         )
 
     @pytest.mark.asyncio
@@ -772,8 +772,9 @@ class TestRelatedEntities:
         query = "{ relatedEntities(id: \"Q1\") { canonicalId } }"
         result = await test_schema.execute(query, context_value=_ctx(postgres_ds=pg))
         assert result.errors is None, f"Errors: {result.errors}"
+        # Default retrocompatível (portal não passa minWeight): weight >= 1.
         pg.get_related_entities.assert_awaited_once_with(
-            "Q1", limit=12, order_by="weight", min_weight=2
+            "Q1", limit=12, order_by="weight", min_weight=1
         )
 
     @pytest.mark.asyncio

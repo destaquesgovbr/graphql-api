@@ -98,14 +98,16 @@ class TestGetRelatedEntities:
         conn.fetch.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_defaults_ordem_por_peso_e_peso_minimo_2(self):
+    async def test_defaults_ordem_por_peso_e_peso_minimo_1(self):
+        # Default retrocompatível: weight >= 1 devolve a mesma lista de antes
+        # (chips de /entidades no portal); quem quiser cortar ruído passa 2.
         pool, conn = _make_mock_pool([[]])
         ds = PostgresDatasource(pool)
 
         await ds.get_related_entities("Q123")
 
         # $1 = entity_id, $2 = limit, $3 = ordenação, $4 = peso mínimo.
-        assert conn.fetch.await_args.args == (_RELATED_ENTITIES_SQL, "Q123", 12, "weight", 2)
+        assert conn.fetch.await_args.args == (_RELATED_ENTITIES_SQL, "Q123", 12, "weight", 1)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("order_by", ["weight", "unique_content", "lift"])
