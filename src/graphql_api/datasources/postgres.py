@@ -91,22 +91,31 @@ class RelatedEntityRecord:
 
 @dataclass
 class EntityNetworkNodeRecord:
-    """Nó da ego-network de uma entidade (Fase 6c)."""
+    """Nó da ego-network de uma entidade (Fase 6c).
+
+    `article_count`/`unique_content_count` vêm de `entity_stats` (migração 032
+    do data-platform); None quando a entidade ainda não tem estatística."""
 
     entity_id: str
     canonical_name: Optional[str] = None
     type: Optional[str] = None
     wikidata_id: Optional[str] = None
+    article_count: Optional[int] = None
+    unique_content_count: Optional[int] = None
 
 
 @dataclass
 class EntityNetworkEdgeRecord:
-    """Aresta da ego-network (Fase 6c). `src`/`dst` são entity_ids."""
+    """Aresta da ego-network (Fase 6c). `src`/`dst` são entity_ids.
+
+    `unique_content_weight` = co-menções com conteúdo distinto
+    (`entity_edges.unique_content_count`, migração 032); None antes do cálculo."""
 
     src: str
     dst: str
     weight: int = 0
     kind: str = "co_mention"
+    unique_content_weight: Optional[int] = None
 
 
 @dataclass
@@ -193,6 +202,12 @@ ORDER BY e.weight DESC, other_id ASC
 LIMIT $2
 """
 
+# Limites da ego-network centrada (GQL-1). Peso 1 = uma única co-menção (ruído).
+_EGO_MIN_WEIGHT = 2
+_EGO_DEFAULT_MAX_NODES = 30
+_EGO_MAX_NODES = 100
+_EGO_MAX_NEIGHBOR_EDGES = 500
+
 # Fase 6c — ego-network multi-hop (depth<=2) via CTE recursiva em `entity_edges`.
 # Parte de `$1` (parametrizado), expande pelas arestas de co-menção até `$2`
 # saltos (clampado a 2 no datasource), coletando o conjunto de entity_ids
@@ -216,9 +231,12 @@ SELECT DISTINCT
   r.entity_id AS entity_id,
   r.canonical_name AS canonical_name,
   r.type AS type,
-  r.wikidata_id AS wikidata_id
+  r.wikidata_id AS wikidata_id,
+  s.article_count AS article_count,
+  s.unique_content_count AS unique_content_count
 FROM (SELECT DISTINCT entity_id FROM reachable) ni
 JOIN entity_registry r ON r.entity_id = ni.entity_id
+LEFT JOIN entity_stats s ON s.entity_id = r.entity_id
 """
 
 _ENTITY_NETWORK_EDGES_SQL = """
@@ -237,13 +255,83 @@ WITH RECURSIVE reachable(entity_id, depth) AS (
 node_ids AS (
   SELECT DISTINCT entity_id FROM reachable
 )
-SELECT e.src_id AS src, e.dst_id AS dst, e.weight AS weight, e.kind AS kind
+SELECT e.src_id AS src, e.dst_id AS dst, e.weight AS weight, e.kind AS kind,
+  e.unique_content_count AS unique_content_weight
 FROM entity_edges e
 WHERE e.kind = 'co_mention'
   AND e.src_id IN (SELECT entity_id FROM node_ids)
   AND e.dst_id IN (SELECT entity_id FROM node_ids)
 ORDER BY e.weight DESC
 LIMIT $3
+"""
+
+# GQL-1 — ego-network centrada no foco (`egoCentered`). A rede legada acima
+# corta as arestas pelo peso global, e as arestas fortes ENTRE vizinhos expulsam
+# as do próprio foco. Aqui os vizinhos são as top `$2` arestas do foco `$1` com
+# weight >= `$3` (ordem determinística weight desc, id asc), e TODAS essas
+# arestas do foco entram; só as arestas entre vizinhos (`$4` liga/desliga) são
+# cortadas em `$5`. Nós e arestas são duas queries com o MESMO CTE `neighbors`
+# (mesma ordem + LIMIT ⇒ mesmo conjunto); o datasource ainda poda órfãos caso o
+# grafo mude entre elas. Foco primeiro (weight NULL), vizinhos por peso.
+_ENTITY_NETWORK_EGO_NODES_SQL = """
+WITH neighbors AS (
+  SELECT
+    CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END AS other_id,
+    e.weight AS weight
+  FROM entity_edges e
+  WHERE e.kind = 'co_mention'
+    AND $1 IN (e.src_id, e.dst_id)
+    AND e.weight >= $3
+  ORDER BY e.weight DESC, other_id ASC
+  LIMIT $2
+),
+node_ids AS (
+  SELECT $1::varchar AS entity_id, NULL::int AS weight
+  UNION ALL
+  SELECT other_id, weight FROM neighbors
+)
+SELECT
+  r.entity_id AS entity_id,
+  r.canonical_name AS canonical_name,
+  r.type AS type,
+  r.wikidata_id AS wikidata_id,
+  s.article_count AS article_count,
+  s.unique_content_count AS unique_content_count
+FROM node_ids ni
+JOIN entity_registry r ON r.entity_id = ni.entity_id
+LEFT JOIN entity_stats s ON s.entity_id = r.entity_id
+ORDER BY ni.weight DESC NULLS FIRST, r.entity_id ASC
+"""
+
+_ENTITY_NETWORK_EGO_EDGES_SQL = """
+WITH neighbors AS (
+  SELECT
+    CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END AS other_id,
+    e.src_id, e.dst_id, e.weight, e.kind, e.unique_content_count
+  FROM entity_edges e
+  WHERE e.kind = 'co_mention'
+    AND $1 IN (e.src_id, e.dst_id)
+    AND e.weight >= $3
+  ORDER BY e.weight DESC, other_id ASC
+  LIMIT $2
+),
+neighbor_edges AS (
+  SELECT e.src_id, e.dst_id, e.weight, e.kind, e.unique_content_count
+  FROM entity_edges e
+  WHERE $4::boolean
+    AND e.kind = 'co_mention'
+    AND e.weight >= $3
+    AND e.src_id IN (SELECT other_id FROM neighbors)
+    AND e.dst_id IN (SELECT other_id FROM neighbors)
+  ORDER BY e.weight DESC, e.src_id ASC, e.dst_id ASC
+  LIMIT $5
+)
+SELECT src_id AS src, dst_id AS dst, weight, kind, unique_content_count AS unique_content_weight
+FROM neighbors
+UNION ALL
+SELECT src_id AS src, dst_id AS dst, weight, kind, unique_content_count AS unique_content_weight
+FROM neighbor_edges
+ORDER BY weight DESC, src ASC, dst ASC
 """
 
 _NEWS_BASE_SQL = """
@@ -746,12 +834,18 @@ def _row_to_related_entity(row: dict) -> RelatedEntityRecord:
     )
 
 
+def _as_optional_int(value: Any) -> Optional[int]:
+    return None if value is None else int(value)
+
+
 def _row_to_network_node(row: dict) -> EntityNetworkNodeRecord:
     return EntityNetworkNodeRecord(
         entity_id=row["entity_id"],
         canonical_name=row.get("canonical_name"),
         type=row.get("type"),
         wikidata_id=row.get("wikidata_id"),
+        article_count=_as_optional_int(row.get("article_count")),
+        unique_content_count=_as_optional_int(row.get("unique_content_count")),
     )
 
 
@@ -761,6 +855,28 @@ def _row_to_network_edge(row: dict) -> EntityNetworkEdgeRecord:
         dst=row["dst"],
         weight=row.get("weight") or 0,
         kind=row.get("kind") or "co_mention",
+        unique_content_weight=_as_optional_int(row.get("unique_content_weight")),
+    )
+
+
+def _prune_ego_network(
+    focus_id: str,
+    nodes: list[EntityNetworkNodeRecord],
+    edges: list[EntityNetworkEdgeRecord],
+) -> EntityNetworkRecord:
+    """Garante a ego-network sem órfãos: só ficam o foco e os vizinhos ligados a
+    ele por aresta, e só as arestas entre esses nós. As duas queries escolhem o
+    mesmo conjunto de vizinhos, mas a DAG pode recalcular `entity_edges` entre
+    elas."""
+    node_ids = {n.entity_id for n in nodes}
+    edges = [e for e in edges if e.src in node_ids and e.dst in node_ids]
+    linked = {focus_id}
+    for e in edges:
+        if focus_id in (e.src, e.dst):
+            linked.add(e.dst if e.src == focus_id else e.src)
+    return EntityNetworkRecord(
+        nodes=[n for n in nodes if n.entity_id in linked],
+        edges=[e for e in edges if e.src in linked and e.dst in linked],
     )
 
 
@@ -946,18 +1062,34 @@ class PostgresDatasource:
         return [_row_to_related_entity(dict(r)) for r in rows]
 
     async def get_entity_network(
-        self, entity_id: str, depth: int = 1, limit: int = 50
+        self,
+        entity_id: str,
+        depth: int = 1,
+        limit: int = 50,
+        ego_centered: bool = False,
+        max_nodes: int = _EGO_DEFAULT_MAX_NODES,
+        include_neighbor_edges: bool = True,
     ) -> EntityNetworkRecord:
         """Ego-network (nós + arestas) ao redor de `entity_id` (Fase 6c).
 
-        CTE recursiva em `entity_edges` (kind=co_mention), travessia
-        não-direcionada até `depth` saltos. `depth` é CLAMPado a [0, 2] aqui
-        (profundidades maiores ficam para o Neo4j numa iteração futura). `limit`
-        limita o nº de arestas (cap de tamanho do grafo). `entity_id` sempre
-        parametrizado ($1) — nunca interpolado (anti-injection). Nós e arestas
-        em duas queries que compartilham a mesma CTE."""
+        Modo legado (default): CTE recursiva em `entity_edges` (kind=co_mention),
+        travessia não-direcionada até `depth` saltos. `depth` é CLAMPado a [0, 2]
+        aqui (profundidades maiores ficam para o Neo4j numa iteração futura).
+        `limit` limita o nº de arestas (cap de tamanho do grafo). Nós e arestas
+        em duas queries que compartilham a mesma CTE.
+
+        `ego_centered=True` (GQL-1): foco + top `max_nodes` (1–100) vizinhos por
+        peso (>= 2), com todas as arestas do foco; `limit` (1–500) corta só as
+        arestas entre vizinhos (`include_neighbor_edges`). `depth` é ignorado.
+
+        `entity_id` sempre parametrizado ($1) — nunca interpolado
+        (anti-injection)."""
         if not entity_id:
             return EntityNetworkRecord(nodes=[], edges=[])
+        if ego_centered:
+            return await self._get_ego_network(
+                entity_id, max_nodes, limit, include_neighbor_edges
+            )
         # Clamp defensivo: depth no máximo 2 (e mínimo 0).
         safe_depth = max(0, min(int(depth), 2))
         async with self._pool.acquire() as conn:
@@ -970,6 +1102,33 @@ class PostgresDatasource:
         return EntityNetworkRecord(
             nodes=[_row_to_network_node(dict(r)) for r in node_rows],
             edges=[_row_to_network_edge(dict(r)) for r in edge_rows],
+        )
+
+    async def _get_ego_network(
+        self,
+        entity_id: str,
+        max_nodes: int,
+        limit: int,
+        include_neighbor_edges: bool,
+    ) -> EntityNetworkRecord:
+        safe_nodes = max(1, min(int(max_nodes), _EGO_MAX_NODES))
+        safe_limit = max(1, min(int(limit), _EGO_MAX_NEIGHBOR_EDGES))
+        async with self._pool.acquire() as conn:
+            node_rows = await conn.fetch(
+                _ENTITY_NETWORK_EGO_NODES_SQL, entity_id, safe_nodes, _EGO_MIN_WEIGHT
+            )
+            edge_rows = await conn.fetch(
+                _ENTITY_NETWORK_EGO_EDGES_SQL,
+                entity_id,
+                safe_nodes,
+                _EGO_MIN_WEIGHT,
+                bool(include_neighbor_edges),
+                safe_limit,
+            )
+        return _prune_ego_network(
+            entity_id,
+            [_row_to_network_node(dict(r)) for r in node_rows],
+            [_row_to_network_edge(dict(r)) for r in edge_rows],
         )
 
     async def get_news_for_typesense(self, unique_id: str) -> Optional[TypesenseDocRecord]:

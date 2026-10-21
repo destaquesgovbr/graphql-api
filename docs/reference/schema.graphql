@@ -320,6 +320,11 @@ type EntityNetworkEdge {
   dst: String!
   weight: Int!
   kind: String!
+
+  """
+  Co-menções com conteúdo distinto: republicações (mesmo content_hash) contam uma vez. `weight` conta artigos. Null antes do cálculo do grafo.
+  """
+  uniqueContentWeight: Int
 }
 
 type EntityNetworkNode {
@@ -327,6 +332,16 @@ type EntityNetworkNode {
   canonicalName: String
   type: String
   wikidataId: String
+
+  """
+  Artigos que mencionam a entidade (entity_stats). Null sem estatística calculada.
+  """
+  articleCount: Int
+
+  """
+  Conteúdos distintos que mencionam a entidade: republicações (mesmo content_hash) contam uma vez (entity_stats). Null sem estatística calculada.
+  """
+  uniqueContentCount: Int
 }
 
 type EntityNode {
@@ -718,9 +733,9 @@ type Query {
   relatedEntities(id: String!, limit: Int! = 12): [RelatedEntity!]!
 
   """
-  Ego-network (nós + arestas) ao redor de `id` (entity_id) para a visualização de rede (Fase 6c). Travessia não-direcionada na rede de co-menção (`entity_edges`) via CTE recursiva até `depth` saltos (CLAMPado a no máx 2; profundidades maiores ficam para o Neo4j futuro). `limit` limita o nº de arestas (cap de tamanho do grafo). Retorna {nodes:[], edges:[]} sem Postgres. PÚBLICO.
+  Ego-network (nós + arestas) ao redor de `id` (entity_id) para a visualização de rede (Fase 6c). Modo legado (default): travessia não-direcionada na rede de co-menção (`entity_edges`) via CTE recursiva até `depth` saltos (CLAMPado a no máx 2; profundidades maiores ficam para o Neo4j futuro); `limit` limita o nº de arestas (cap de tamanho do grafo). `egoCentered: true`: a entidade + seus `maxNodes` (1–100) vizinhos mais fortes (weight >= 2), com TODAS as arestas da entidade; `limit` (1–500) corta só as arestas entre vizinhos (`includeNeighborEdges`); `depth` é ignorado. Retorna {nodes:[], edges:[]} sem Postgres. PÚBLICO.
   """
-  entityNetwork(id: String!, depth: Int! = 1, limit: Int! = 50): EntityNetwork!
+  entityNetwork(id: String!, depth: Int! = 1, limit: Int! = 50, egoCentered: Boolean! = false, maxNodes: Int! = 30, includeNeighborEdges: Boolean! = true): EntityNetwork!
 
   """
   Contagem de artigos por code de tema (nivel `level`) nos ultimos `days` dias. `label` e None (o portal mapeia pela config). PUBLICO.

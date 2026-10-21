@@ -108,6 +108,17 @@ class EntityNetworkNode:
     canonical_name: Optional[str] = None
     type: Optional[str] = None
     wikidata_id: Optional[str] = None
+    article_count: Optional[int] = strawberry.field(
+        default=None,
+        description="Artigos que mencionam a entidade (entity_stats). Null sem estatística calculada.",
+    )
+    unique_content_count: Optional[int] = strawberry.field(
+        default=None,
+        description=(
+            "Conteúdos distintos que mencionam a entidade: republicações (mesmo content_hash) contam "
+            "uma vez (entity_stats). Null sem estatística calculada."
+        ),
+    )
 
 
 @strawberry.type
@@ -118,6 +129,13 @@ class EntityNetworkEdge:
     dst: str
     weight: int = 0
     kind: str = "co_mention"
+    unique_content_weight: Optional[int] = strawberry.field(
+        default=None,
+        description=(
+            "Co-menções com conteúdo distinto: republicações (mesmo content_hash) contam uma vez. "
+            "`weight` conta artigos. Null antes do cálculo do grafo."
+        ),
+    )
 
 
 @strawberry.type
@@ -318,11 +336,15 @@ class PublicContentQuery:
     @strawberry.field(
         description=(
             "Ego-network (nós + arestas) ao redor de `id` (entity_id) para a "
-            "visualização de rede (Fase 6c). Travessia não-direcionada na rede "
-            "de co-menção (`entity_edges`) via CTE recursiva até `depth` saltos "
-            "(CLAMPado a no máx 2; profundidades maiores ficam para o Neo4j "
-            "futuro). `limit` limita o nº de arestas (cap de tamanho do grafo). "
-            "Retorna {nodes:[], edges:[]} sem Postgres. PÚBLICO."
+            "visualização de rede (Fase 6c). Modo legado (default): travessia "
+            "não-direcionada na rede de co-menção (`entity_edges`) via CTE "
+            "recursiva até `depth` saltos (CLAMPado a no máx 2; profundidades "
+            "maiores ficam para o Neo4j futuro); `limit` limita o nº de arestas "
+            "(cap de tamanho do grafo). `egoCentered: true`: a entidade + seus "
+            "`maxNodes` (1–100) vizinhos mais fortes (weight >= 2), com TODAS as "
+            "arestas da entidade; `limit` (1–500) corta só as arestas entre "
+            "vizinhos (`includeNeighborEdges`); `depth` é ignorado. Retorna "
+            "{nodes:[], edges:[]} sem Postgres. PÚBLICO."
         )
     )
     async def entity_network(
@@ -331,12 +353,22 @@ class PublicContentQuery:
         id: str,
         depth: int = 1,
         limit: int = 50,
+        ego_centered: bool = False,
+        max_nodes: int = 30,
+        include_neighbor_edges: bool = True,
     ) -> EntityNetwork:
         ctx = info.context
         pg = ctx.postgres_ds
         if pg is None:
             return EntityNetwork(nodes=[], edges=[])
-        net = await pg.get_entity_network(id, depth=depth, limit=limit)
+        net = await pg.get_entity_network(
+            id,
+            depth=depth,
+            limit=limit,
+            ego_centered=ego_centered,
+            max_nodes=max_nodes,
+            include_neighbor_edges=include_neighbor_edges,
+        )
         return EntityNetwork(
             nodes=[
                 EntityNetworkNode(
@@ -344,6 +376,8 @@ class PublicContentQuery:
                     canonical_name=n.canonical_name,
                     type=n.type,
                     wikidata_id=n.wikidata_id,
+                    article_count=n.article_count,
+                    unique_content_count=n.unique_content_count,
                 )
                 for n in net.nodes
             ],
@@ -353,6 +387,7 @@ class PublicContentQuery:
                     dst=e.dst,
                     weight=e.weight,
                     kind=e.kind,
+                    unique_content_weight=e.unique_content_weight,
                 )
                 for e in net.edges
             ],
