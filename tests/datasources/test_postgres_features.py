@@ -435,3 +435,29 @@ class TestSentimentoNasQueries:
         sql = _flat(conn.fetch.await_args.args[0])
         assert _NESTED_SCORE in sql
         assert "AVG((nf.features->>'sentiment_score')::float)" not in sql
+
+
+class TestFleschPtbrNasQueries:
+    """GQL-1: agencyAnalytics (MONTH/WEEK e DAY) agrega também o Flesch pt-BR
+    (`readability_flesch_ptbr`) e conta quantos artigos o têm (cobertura do
+    backfill); o `avg_readability_flesch` continua igual."""
+
+    async def _sql(self, granularity: str) -> str:
+        pool, conn = _make_fetch_pool([])
+        ds = PostgresDatasource(pool)
+        await ds.agency_analytics(granularity, ["mec"], "2026-09-01", "2026-09-30")
+        return _flat(conn.fetch.await_args.args[0])
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("granularity", ["month", "week", "day"])
+    async def test_media_e_contagem_ptbr(self, granularity):
+        sql = await self._sql(granularity)
+        assert "AVG((nf.features->>'readability_flesch_ptbr')::float) AS avg_readability_flesch_ptbr" in sql
+        assert "COUNT(nf.features->>'readability_flesch_ptbr') AS readability_flesch_ptbr_count" in sql
+        assert "AVG((nf.features->>'readability_flesch')::float) AS avg_readability_flesch" in sql
+
+    @pytest.mark.asyncio
+    async def test_day_preenche_contagem_zero_nos_dias_sem_artigo(self):
+        sql = await self._sql("day")
+        assert "da.avg_readability_flesch_ptbr" in sql
+        assert "COALESCE(da.readability_flesch_ptbr_count, 0) AS readability_flesch_ptbr_count" in sql

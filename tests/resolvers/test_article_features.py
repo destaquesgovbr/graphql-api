@@ -373,3 +373,42 @@ async def test_malformed_annotations_are_skipped():
         {"start": 0, "end": 5, "type": "ORG", "text": "Valid", "canonicalId": None},
         {"start": 7, "end": 9, "type": "LOC", "text": "OK2", "canonicalId": None},
     ]
+
+
+# GQL-1: Flesch adaptado ao português (Martins et al., 1996), gravado pelo
+# data-platform em `readability_flesch_ptbr`. O `readability_flesch` (fórmula
+# inglesa) continua igual.
+FLESCH_PTBR_QUERY = """
+    query($id: String!) {
+        article(uniqueId: $id) {
+            features { readabilityFlesch readabilityFleschPtbr }
+        }
+    }
+"""
+
+
+@pytest.mark.asyncio
+async def test_readability_flesch_ptbr_mapeado():
+    ts = _ts_with_article("a")
+    pg = _pg_with_features({"a": {"readability_flesch": 12.5, "readability_flesch_ptbr": 48.25}})
+    ctx = GraphQLContext(typesense_ds=ts, postgres_ds=pg)
+    result = await test_schema.execute(FLESCH_PTBR_QUERY, variable_values={"id": "a"}, context_value=ctx)
+    assert result.errors is None, f"Errors: {result.errors}"
+    assert result.data["article"]["features"] == {
+        "readabilityFlesch": 12.5,
+        "readabilityFleschPtbr": 48.25,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valor", [None, True, "48.2", [1]])
+async def test_readability_flesch_ptbr_ausente_ou_invalido_vira_null(valor):
+    ts = _ts_with_article("a")
+    features = {"word_count": 10}
+    if valor is not None:
+        features["readability_flesch_ptbr"] = valor
+    pg = _pg_with_features({"a": features})
+    ctx = GraphQLContext(typesense_ds=ts, postgres_ds=pg)
+    result = await test_schema.execute(FLESCH_PTBR_QUERY, variable_values={"id": "a"}, context_value=ctx)
+    assert result.errors is None, f"Errors: {result.errors}"
+    assert result.data["article"]["features"]["readabilityFleschPtbr"] is None

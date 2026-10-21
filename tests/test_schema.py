@@ -76,6 +76,19 @@ def test_article_exposes_features_field():
     assert "wordCount: Int" in feats_block
     # Fase 5: contentAnnotations (lente semântica).
     assert "contentAnnotations: [ContentAnnotation!]!" in feats_block
+    # GQL-1: Flesch pt-BR (Martins/1996) ao lado do inglês.
+    assert "readabilityFlesch: Float" in feats_block
+    assert "readabilityFleschPtbr: Float" in feats_block
+
+
+def test_agency_period_metrics_expoe_flesch_ptbr():
+    from graphql_api.schema import schema
+
+    sdl = schema.as_str()
+    block = sdl.split("type AgencyPeriodMetrics {", 1)[1].split("}", 1)[0]
+    assert "avgReadabilityFlesch: Float" in block
+    assert "avgReadabilityFleschPtbr: Float" in block
+    assert "readabilityFleschPtbrCount: Int" in block
 
 
 def test_content_annotation_type_exposed():

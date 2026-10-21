@@ -476,6 +476,66 @@ class TestAgencyAnalytics:
         assert all(v is None for v in second.values())
 
     @pytest.mark.asyncio
+    async def test_flesch_ptbr_media_float_e_contagem(self):
+        """GQL-1: Flesch pt-BR ao lado do inglês; AVG chega como Decimal."""
+        from decimal import Decimal
+
+        mock_pg = AsyncMock()
+        mock_pg.agency_analytics = AsyncMock(return_value=[
+            {
+                "period": "2026-09-01 00:00:00+00",
+                "agency_key": "saude",
+                "agency_name": "Ministério da Saúde",
+                "article_count": 120,
+                "avg_readability_flesch": Decimal("33.5"),
+                "avg_readability_flesch_ptbr": Decimal("51.75"),
+                "readability_flesch_ptbr_count": 118,
+            },
+            # Período sem nenhum artigo com Flesch pt-BR (antes do backfill).
+            {
+                "period": "2026-10-01 00:00:00+00",
+                "agency_key": "saude",
+                "agency_name": "Ministério da Saúde",
+                "article_count": 10,
+                "avg_readability_flesch": None,
+                "avg_readability_flesch_ptbr": None,
+                "readability_flesch_ptbr_count": 0,
+            },
+        ])
+        query = """
+        query {
+            agencyAnalytics(agencies: ["saude"] dateFrom: "2026-09-01" dateTo: "2026-10-31" granularity: MONTH) {
+                avgReadabilityFlesch avgReadabilityFleschPtbr readabilityFleschPtbrCount
+            }
+        }
+        """
+        result = await test_schema.execute(query, context_value=FakeContext(postgres_ds=mock_pg))
+        assert result.errors is None
+        assert result.data["agencyAnalytics"] == [
+            {"avgReadabilityFlesch": 33.5, "avgReadabilityFleschPtbr": 51.75, "readabilityFleschPtbrCount": 118},
+            {"avgReadabilityFlesch": None, "avgReadabilityFleschPtbr": None, "readabilityFleschPtbrCount": 0},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_flesch_ptbr_ausente_na_linha_vira_null(self):
+        mock_pg = AsyncMock()
+        mock_pg.agency_analytics = AsyncMock(return_value=[
+            {"period": "2026-09", "agency_key": "mec", "agency_name": "MEC", "article_count": 1},
+        ])
+        query = """
+        query {
+            agencyAnalytics(agencies: ["mec"] dateFrom: "2026-09-01" dateTo: "2026-09-30") {
+                avgReadabilityFleschPtbr readabilityFleschPtbrCount
+            }
+        }
+        """
+        result = await test_schema.execute(query, context_value=FakeContext(postgres_ds=mock_pg))
+        assert result.errors is None
+        assert result.data["agencyAnalytics"] == [
+            {"avgReadabilityFleschPtbr": None, "readabilityFleschPtbrCount": None}
+        ]
+
+    @pytest.mark.asyncio
     async def test_retorna_metricas_por_periodo(self):
         mock_pg = AsyncMock()
         mock_pg.agency_analytics = AsyncMock(return_value=[
