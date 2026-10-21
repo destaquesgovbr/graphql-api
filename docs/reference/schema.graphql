@@ -301,6 +301,15 @@ type EntityFacet {
   label: String
 }
 
+"""
+Totais do grafo de entidades (entity_graph_meta), recalculados pela DAG do grafo; N do lift de `relatedEntities`.
+"""
+type EntityGraphStats {
+  totalArticles: Int!
+  totalUniqueContent: Int!
+  computedAt: DateTime
+}
+
 enum EntityKind {
   ORG
   PER
@@ -353,6 +362,16 @@ type EntityNode {
   wikidataUrl: String
   description: String
   agencyKey: String
+
+  """
+  Artigos que mencionam a entidade (entity_stats). Null sem estatística calculada.
+  """
+  articleCount: Int
+
+  """
+  Conteúdos distintos que mencionam a entidade: republicações (mesmo content_hash) contam uma vez (entity_stats). Null sem estatística calculada.
+  """
+  uniqueContentCount: Int
 }
 
 type EntitySearchResult {
@@ -728,9 +747,14 @@ type Query {
   entity(id: String!): EntityNode
 
   """
-  Entidades relacionadas a `id` (entity_id) por co-menção (Fase 6c). Lê a rede de co-menção materializada (`entity_edges`, 1-hop), retorna os vizinhos hidratados do entity_registry, ordenados por `weight` (nº de artigos em co-menção) desc, até `limit`. Retorna [] sem Postgres ou sem vizinhos. PÚBLICO.
+  Entidades relacionadas a `id` (entity_id) por co-menção (Fase 6c). Lê a rede de co-menção materializada (`entity_edges`, 1-hop), retorna os vizinhos hidratados do entity_registry com weight >= `minWeight` (mínimo 1), ordenados por `orderBy` (default WEIGHT = nº de artigos em co-menção) desc, até `limit`. Retorna [] sem Postgres ou sem vizinhos. PÚBLICO.
   """
-  relatedEntities(id: String!, limit: Int! = 12): [RelatedEntity!]!
+  relatedEntities(id: String!, limit: Int! = 12, orderBy: RelatedEntityOrder! = WEIGHT, minWeight: Int! = 2): [RelatedEntity!]!
+
+  """
+  Totais do grafo de entidades (entity_graph_meta): artigos e conteúdos distintos considerados e quando foram calculados. Null sem Postgres ou antes da primeira execução da DAG do grafo. PÚBLICO.
+  """
+  entityGraphStats: EntityGraphStats
 
   """
   Ego-network (nós + arestas) ao redor de `id` (entity_id) para a visualização de rede (Fase 6c). Modo legado (default): travessia não-direcionada na rede de co-menção (`entity_edges`) via CTE recursiva até `depth` saltos (CLAMPado a no máx 2; profundidades maiores ficam para o Neo4j futuro); `limit` limita o nº de arestas (cap de tamanho do grafo). `egoCentered: true`: a entidade + seus `maxNodes` (1–100) vizinhos mais fortes (weight >= 2), com TODAS as arestas da entidade; `limit` (1–500) corta só as arestas entre vizinhos (`includeNeighborEdges`); `depth` é ignorado. Retorna {nodes:[], edges:[]} sem Postgres. PÚBLICO.
@@ -797,6 +821,35 @@ type RelatedEntity {
   wikidataId: String
   weight: Int!
   kind: String!
+
+  """
+  Artigos que mencionam o vizinho (entity_stats). Null sem estatística calculada.
+  """
+  articleCount: Int
+
+  """
+  Conteúdos distintos que mencionam o vizinho: republicações (mesmo content_hash) contam uma vez (entity_stats). Null sem estatística calculada.
+  """
+  uniqueContentCount: Int
+
+  """
+  Co-menções com conteúdo distinto: republicações (mesmo content_hash) contam uma vez. `weight` conta artigos. Null antes do cálculo do grafo.
+  """
+  uniqueContentWeight: Int
+
+  """
+  weight · N / (artigos da entidade · artigos do vizinho), com N = entityGraphStats.totalArticles. > 1: co-menção acima do esperado ao acaso. Null quando falta estatística de uma das pontas ou o total do grafo.
+  """
+  lift: Float
+}
+
+"""
+Ordenação de `relatedEntities`. WEIGHT: artigos em co-menção (legado). UNIQUE_CONTENT: co-menções com conteúdo distinto (desconta republicações). LIFT: co-menção observada / esperada pela frequência das duas entidades (destaca associações específicas em vez de entidades genéricas). Valores nulos vão para o fim; desempate por weight.
+"""
+enum RelatedEntityOrder {
+  WEIGHT
+  UNIQUE_CONTENT
+  LIFT
 }
 
 type Release {

@@ -71,6 +71,10 @@ class EntityRegistryRecord:
     wikidata_url: Optional[str] = None
     description: Optional[str] = None
     agency_key: Optional[str] = None
+    # GQL-1: `entity_stats` (migração 032); None sem estatística calculada.
+    # Só `_ENTITY_REGISTRY_SQL` (entity(id)) junta; o batch deixa None.
+    article_count: Optional[int] = None
+    unique_content_count: Optional[int] = None
 
 
 @dataclass
@@ -87,6 +91,21 @@ class RelatedEntityRecord:
     wikidata_id: Optional[str] = None
     weight: int = 0
     kind: str = "co_mention"
+    # GQL-1 (migração 032): stats do vizinho, co-menções com conteúdo distinto e
+    # lift da aresta. None quando falta estatística (ver `_RELATED_ENTITIES_SQL`).
+    article_count: Optional[int] = None
+    unique_content_count: Optional[int] = None
+    unique_content_weight: Optional[int] = None
+    lift: Optional[float] = None
+
+
+@dataclass
+class EntityGraphStatsRecord:
+    """Totais do grafo de entidades (`entity_graph_meta`, linha única id=1)."""
+
+    total_articles: int
+    total_unique_content: int
+    computed_at: Optional[datetime] = None
 
 
 @dataclass
@@ -166,10 +185,13 @@ WHERE unique_id = ANY($1)
 # (asyncpg devolve como str → json.loads). `description`/`wikidata_*` podem ser
 # nulos quando a entidade não foi linkada ao Wikidata.
 _ENTITY_REGISTRY_SQL = """
-SELECT entity_id, canonical_name, type, aliases,
-  wikidata_id, wikidata_url, description, agency_key
-FROM entity_registry
-WHERE entity_id = $1
+SELECT r.entity_id, r.canonical_name, r.type, r.aliases,
+  r.wikidata_id, r.wikidata_url, r.description, r.agency_key,
+  s.article_count AS article_count,
+  s.unique_content_count AS unique_content_count
+FROM entity_registry r
+LEFT JOIN entity_stats s ON s.entity_id = r.entity_id
+WHERE r.entity_id = $1
 """
 
 _ENTITY_REGISTRY_BATCH_SQL = """
@@ -183,24 +205,69 @@ WHERE entity_id = ANY($1)
 # `entity_edges` onde a entidade aparece em qualquer ponta (src_id OU dst_id),
 # pega a "outra ponta" e junta com `entity_registry` para hidratar
 # nome/tipo/wikidata. `entity_id` SEMPRE como `$1` parametrizado (sem
-# interpolação — risco de injection). Ordenado por weight desc; LIMIT em $2.
-# A ordem canônica src_id < dst_id em entity_edges garante 1 linha por par.
+# interpolação — risco de injection). LIMIT em $2. A ordem canônica
+# src_id < dst_id em entity_edges garante 1 linha por par.
+#
+# GQL-1: `$4` = peso mínimo da aresta; `$3` = ordenação (whitelist no
+# datasource): 'weight' (legado), 'unique_content' (co-menções com conteúdo
+# distinto) ou 'lift' = weight·N / (cnt_ego·cnt_vizinho), com N =
+# entity_graph_meta.total_articles e cnt = entity_stats.article_count — NULL se
+# qualquer termo faltar ou for 0 (NULLIF). Nulos vão para o fim e o desempate é
+# sempre weight desc, other_id asc (com 'weight', a ordem legada).
 _RELATED_ENTITIES_SQL = """
-SELECT
-  CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END AS other_id,
-  e.weight AS weight,
-  e.kind AS kind,
-  r.canonical_name AS canonical_name,
-  r.type AS type,
-  r.wikidata_id AS wikidata_id
-FROM entity_edges e
-JOIN entity_registry r
-  ON r.entity_id = CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END
-WHERE e.kind = 'co_mention'
-  AND ($1 IN (e.src_id, e.dst_id))
-ORDER BY e.weight DESC, other_id ASC
+WITH neighbors AS (
+  SELECT
+    CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END AS other_id,
+    e.weight AS weight,
+    e.kind AS kind,
+    e.unique_content_count AS unique_content_weight
+  FROM entity_edges e
+  WHERE e.kind = 'co_mention'
+    AND ($1 IN (e.src_id, e.dst_id))
+    AND e.weight >= $4
+),
+scored AS (
+  SELECT
+    nb.other_id,
+    nb.weight,
+    nb.kind,
+    nb.unique_content_weight,
+    r.canonical_name AS canonical_name,
+    r.type AS type,
+    r.wikidata_id AS wikidata_id,
+    so.article_count AS article_count,
+    so.unique_content_count AS unique_content_count,
+    nb.weight::float8 * NULLIF(m.total_articles, 0)
+      / (NULLIF(se.article_count, 0)::float8 * NULLIF(so.article_count, 0)) AS lift
+  FROM neighbors nb
+  JOIN entity_registry r ON r.entity_id = nb.other_id
+  LEFT JOIN entity_stats so ON so.entity_id = nb.other_id
+  LEFT JOIN entity_stats se ON se.entity_id = $1
+  LEFT JOIN entity_graph_meta m ON m.id = 1
+)
+SELECT other_id, weight, kind, unique_content_weight, canonical_name, type,
+  wikidata_id, article_count, unique_content_count, lift
+FROM scored
+ORDER BY
+  CASE $3::text
+    WHEN 'lift' THEN lift
+    WHEN 'unique_content' THEN unique_content_weight::float8
+    ELSE weight::float8
+  END DESC NULLS LAST,
+  weight DESC, other_id ASC
 LIMIT $2
 """
+
+# Totais do grafo (linha única id=1), recalculados pela DAG junto com
+# entity_stats (migração 032). N do lift.
+_ENTITY_GRAPH_STATS_SQL = """
+SELECT total_articles, total_unique_content, computed_at
+FROM entity_graph_meta
+WHERE id = 1
+"""
+
+# Ordenações aceitas por `get_related_entities` ($3 de `_RELATED_ENTITIES_SQL`).
+_RELATED_ENTITY_ORDERS = frozenset({"weight", "unique_content", "lift"})
 
 # Limites da ego-network centrada (GQL-1). Peso 1 = uma única co-menção (ruído).
 _EGO_MIN_WEIGHT = 2
@@ -810,6 +877,16 @@ def _coerce_alias_list(raw: Any) -> list[str]:
     return out
 
 
+def _as_optional_int(value: Any) -> Optional[int]:
+    return None if value is None else int(value)
+
+
+def _as_optional_float(value: Any) -> Optional[float]:
+    """Decimal/numérico do asyncpg → float (o Float do graphql-core 3.3 rejeita
+    Decimal); None passa."""
+    return None if value is None else float(value)
+
+
 def _row_to_entity_registry(row: dict) -> EntityRegistryRecord:
     return EntityRegistryRecord(
         entity_id=row["entity_id"],
@@ -820,6 +897,8 @@ def _row_to_entity_registry(row: dict) -> EntityRegistryRecord:
         wikidata_url=row.get("wikidata_url"),
         description=row.get("description"),
         agency_key=row.get("agency_key"),
+        article_count=_as_optional_int(row.get("article_count")),
+        unique_content_count=_as_optional_int(row.get("unique_content_count")),
     )
 
 
@@ -831,11 +910,11 @@ def _row_to_related_entity(row: dict) -> RelatedEntityRecord:
         wikidata_id=row.get("wikidata_id"),
         weight=row.get("weight") or 0,
         kind=row.get("kind") or "co_mention",
+        article_count=_as_optional_int(row.get("article_count")),
+        unique_content_count=_as_optional_int(row.get("unique_content_count")),
+        unique_content_weight=_as_optional_int(row.get("unique_content_weight")),
+        lift=_as_optional_float(row.get("lift")),
     )
-
-
-def _as_optional_int(value: Any) -> Optional[int]:
-    return None if value is None else int(value)
 
 
 def _row_to_network_node(row: dict) -> EntityNetworkNodeRecord:
@@ -1047,19 +1126,47 @@ class PostgresDatasource:
         return result
 
     async def get_related_entities(
-        self, entity_id: str, limit: int = 12
+        self,
+        entity_id: str,
+        limit: int = 12,
+        order_by: str = "weight",
+        min_weight: int = 2,
     ) -> list[RelatedEntityRecord]:
         """Vizinhos 1-hop de `entity_id` na rede de co-menção (Fase 6c).
 
         Lê `entity_edges` (kind=co_mention) onde a entidade aparece em qualquer
         ponta, pega a "outra ponta" e junta com `entity_registry` para hidratar
-        nome/tipo/wikidata. Ordenado por weight desc; até `limit`. `entity_id`
+        nome/tipo/wikidata, e com `entity_stats`/`entity_graph_meta` para as
+        estatísticas e o lift (GQL-1). Só arestas com weight >= `min_weight`
+        (mínimo 1). `order_by`: 'weight' (default), 'unique_content' ou 'lift'
+        (nulos por último; desempate weight desc). Até `limit`. `entity_id`
         sempre parametrizado ($1) — nunca interpolado (anti-injection)."""
+        if order_by not in _RELATED_ENTITY_ORDERS:
+            raise ValueError(f"order_by inválido: {order_by!r}")
         if not entity_id:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(_RELATED_ENTITIES_SQL, entity_id, limit)
+            rows = await conn.fetch(
+                _RELATED_ENTITIES_SQL,
+                entity_id,
+                limit,
+                order_by,
+                max(1, int(min_weight)),
+            )
         return [_row_to_related_entity(dict(r)) for r in rows]
+
+    async def get_entity_graph_stats(self) -> Optional[EntityGraphStatsRecord]:
+        """Totais do grafo de entidades (`entity_graph_meta`); None sem linha
+        (DAG ainda não rodou após a migração 032)."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(_ENTITY_GRAPH_STATS_SQL)
+        if row is None:
+            return None
+        return EntityGraphStatsRecord(
+            total_articles=int(row["total_articles"]),
+            total_unique_content=int(row["total_unique_content"]),
+            computed_at=row["computed_at"],
+        )
 
     async def get_entity_network(
         self,
