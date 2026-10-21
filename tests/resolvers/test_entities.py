@@ -99,3 +99,13 @@ class TestEntitySearch:
         result = await test_schema.execute(query, context_value=_make_ctx(postgres_ds=mock_pg))
         assert result.errors is None
         assert result.data["entitySearch"] == []
+
+
+class TestEntityCoverageSDL:
+    def test_descricao_documenta_dias_utc_e_date_to_exclusivo(self):
+        field = next(
+            f for f in test_schema.get_type_by_name("Query").fields if f.python_name == "entity_coverage"
+        )
+        assert "dias UTC" in field.description
+        assert "dateFrom inclusivo" in field.description
+        assert "dateTo exclusivo" in field.description

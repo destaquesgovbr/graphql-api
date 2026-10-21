@@ -5,13 +5,14 @@ recursiva, clamp de depth). Mock do pool asyncpg — verifica que o `entity_id`
 vai SEMPRE parametrizado ($1), o clamp de depth e o mapeamento das linhas.
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from graphql_api.datasources.postgres import (
+    _ENTITY_COVERAGE_SQL,
     _ENTITY_NETWORK_EDGES_SQL,
     _ENTITY_NETWORK_EGO_EDGES_SQL,
     _ENTITY_NETWORK_EGO_NODES_SQL,
@@ -498,3 +499,51 @@ class TestGetEntityGraphStats:
         ds = PostgresDatasource(pool)
 
         assert await ds.get_entity_graph_stats() is None
+
+
+class TestEntityCoverageDatas:
+    """entityCoverage: dias UTC, dateFrom inclusivo e dateTo EXCLUSIVO (GQL-1).
+
+    Antes, `published_at <= $4::timestamptz` com uma data comparava com a
+    meia-noite do dateTo no fuso da sessão: na prática exclusivo, exceto pelos
+    artigos publicados exatamente às 00:00:00."""
+
+    @pytest.mark.asyncio
+    async def test_datas_vao_como_date(self):
+        pool, conn = _make_mock_pool([[]])
+        ds = PostgresDatasource(pool)
+
+        await ds.entity_coverage("Q1", "day", "2026-10-01", "2026-10-08")
+
+        assert conn.fetch.await_args.args == (
+            _ENTITY_COVERAGE_SQL,
+            "day",
+            "Q1",
+            date(2026, 10, 1),
+            date(2026, 10, 8),
+        )
+
+    @pytest.mark.asyncio
+    async def test_sem_datas_vao_nulas(self):
+        pool, conn = _make_mock_pool([[]])
+        ds = PostgresDatasource(pool)
+
+        await ds.entity_coverage("Q1")
+
+        assert conn.fetch.await_args.args[1:] == ("month", "Q1", None, None)
+
+    def test_sql_date_to_exclusivo_em_utc(self):
+        sql = _flat(_ENTITY_COVERAGE_SQL)
+        assert "ne.published_at >= ($3::date)::timestamp AT TIME ZONE 'UTC'" in sql
+        assert "ne.published_at < ($4::date)::timestamp AT TIME ZONE 'UTC'" in sql
+        assert "<= $4" not in sql
+        assert "::timestamptz" not in sql
+
+    def test_sql_period_em_utc_com_formato_inalterado(self):
+        # Mesmo texto que `timestamptz::text` dava com a sessão em UTC
+        # ("2026-08-27 00:00:00+00"), mas sem depender do fuso da sessão.
+        sql = _flat(_ENTITY_COVERAGE_SQL)
+        assert (
+            "to_char(DATE_TRUNC($1, ne.published_at AT TIME ZONE 'UTC'), "
+            "'YYYY-MM-DD HH24:MI:SS\"+00\"') AS period"
+        ) in sql
