@@ -74,9 +74,13 @@ class AgencyPeriodMetrics:
 class ArticleSummary:
     unique_id: str
     title: str
-    agency_name: Optional[str]
+    agency_name: Optional[str] = strawberry.field(
+        description="Key da agência (o mesmo valor de agencyKey, apesar do nome). Mantido por compatibilidade.",
+    )
     published_at: Optional[str]
     trending_score: Optional[float]
+    url: Optional[str] = strawberry.field(default=None, description="Link do artigo no portal de origem.")
+    agency_key: Optional[str] = strawberry.field(default=None, description="Key da agência (ex.: 'saude').")
 
 
 @strawberry.type

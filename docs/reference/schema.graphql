@@ -149,9 +149,19 @@ enum ArticleSort {
 type ArticleSummary {
   uniqueId: String!
   title: String!
+
+  """
+  Key da agência (o mesmo valor de agencyKey, apesar do nome). Mantido por compatibilidade.
+  """
   agencyName: String
   publishedAt: String
   trendingScore: Float
+
+  """Link do artigo no portal de origem."""
+  url: String
+
+  """Key da agência (ex.: 'saude')."""
+  agencyKey: String
 }
 
 type ArticlesResult {

@@ -261,7 +261,7 @@ class AnalyticsQuery:
                     "per_page": 5,
                     "filter_by": theme_filter,
                     "sort_by": "trending_score:desc,published_at:desc",
-                    "include_fields": "id,unique_id,title,agency,published_at,trending_score",
+                    "include_fields": "id,unique_id,title,url,agency,published_at,trending_score",
                 })
                 result.top_articles = [
                     ArticleSummary(
@@ -276,6 +276,8 @@ class AnalyticsQuery:
                             else None
                         ),
                         trending_score=h["document"].get("trending_score"),
+                        url=h["document"].get("url"),
+                        agency_key=h["document"].get("agency"),
                     )
                     for h in art_resp.get("hits", [])
                 ]
