@@ -647,9 +647,22 @@ class TestSDL:
         assert "edges: [EntityNetworkEdge!]!" in gblock
 
         assert (
-            "entityNetwork(id: String!, depth: Int! = 1, limit: Int! = 50): EntityNetwork!"
+            "entityNetwork(id: String!, depth: Int! = 1, limit: Int! = 50, "
+            "egoCentered: Boolean! = false, maxNodes: Int! = 30, "
+            "includeNeighborEdges: Boolean! = true): EntityNetwork!"
             in sdl
         )
+
+    def test_entity_network_stats_fields(self):
+        # GQL-1: estatísticas do grafo (entity_stats / entity_edges), nullable.
+        sdl = test_schema.as_str()
+        nblock = sdl.split("type EntityNetworkNode {", 1)[1].split("}", 1)[0]
+        assert "articleCount: Int" in nblock
+        assert "articleCount: Int!" not in nblock
+        assert "uniqueContentCount: Int" in nblock
+        eblock = sdl.split("type EntityNetworkEdge {", 1)[1].split("}", 1)[0]
+        assert "uniqueContentWeight: Int" in eblock
+        assert "uniqueContentWeight: Int!" not in eblock
 
 
 # ---------------------------------------------------------------------------
@@ -803,7 +816,14 @@ class TestEntityNetwork:
         assert data["edges"] == [
             {"src": "Q1", "dst": "Q2", "weight": 9, "kind": "co_mention"}
         ]
-        pg.get_entity_network.assert_awaited_once_with("Q1", depth=2, limit=50)
+        pg.get_entity_network.assert_awaited_once_with(
+            "Q1",
+            depth=2,
+            limit=50,
+            ego_centered=False,
+            max_nodes=30,
+            include_neighbor_edges=True,
+        )
 
     @pytest.mark.asyncio
     async def test_defaults_depth_and_limit(self):
@@ -814,7 +834,72 @@ class TestEntityNetwork:
         query = "{ entityNetwork(id: \"Q1\") { nodes { entityId } edges { src } } }"
         result = await test_schema.execute(query, context_value=_ctx(postgres_ds=pg))
         assert result.errors is None, f"Errors: {result.errors}"
-        pg.get_entity_network.assert_awaited_once_with("Q1", depth=1, limit=50)
+        # Default = modo legado (o portal não passa os args novos).
+        pg.get_entity_network.assert_awaited_once_with(
+            "Q1",
+            depth=1,
+            limit=50,
+            ego_centered=False,
+            max_nodes=30,
+            include_neighbor_edges=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_ego_centered_repassa_args(self):
+        pg = MagicMock()
+        pg.get_entity_network = AsyncMock(
+            return_value=EntityNetworkRecord(nodes=[], edges=[])
+        )
+        query = (
+            '{ entityNetwork(id: "Q1", egoCentered: true, maxNodes: 10, '
+            "includeNeighborEdges: false, limit: 80) { nodes { entityId } } }"
+        )
+        result = await test_schema.execute(query, context_value=_ctx(postgres_ds=pg))
+        assert result.errors is None, f"Errors: {result.errors}"
+        pg.get_entity_network.assert_awaited_once_with(
+            "Q1",
+            depth=1,
+            limit=80,
+            ego_centered=True,
+            max_nodes=10,
+            include_neighbor_edges=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_mapeia_stats_dos_nos_e_arestas(self):
+        pg = MagicMock()
+        pg.get_entity_network = AsyncMock(
+            return_value=EntityNetworkRecord(
+                nodes=[
+                    EntityNetworkNodeRecord(
+                        entity_id="Q1", article_count=120, unique_content_count=95
+                    ),
+                    EntityNetworkNodeRecord(entity_id="Q2"),
+                ],
+                edges=[
+                    EntityNetworkEdgeRecord(
+                        src="Q1", dst="Q2", weight=9, unique_content_weight=7
+                    ),
+                    EntityNetworkEdgeRecord(src="Q2", dst="Q1", weight=2),
+                ],
+            )
+        )
+        query = (
+            '{ entityNetwork(id: "Q1", egoCentered: true) { '
+            "nodes { entityId articleCount uniqueContentCount } "
+            "edges { src uniqueContentWeight } } }"
+        )
+        result = await test_schema.execute(query, context_value=_ctx(postgres_ds=pg))
+        assert result.errors is None, f"Errors: {result.errors}"
+        data = result.data["entityNetwork"]
+        assert data["nodes"] == [
+            {"entityId": "Q1", "articleCount": 120, "uniqueContentCount": 95},
+            {"entityId": "Q2", "articleCount": None, "uniqueContentCount": None},
+        ]
+        assert data["edges"] == [
+            {"src": "Q1", "uniqueContentWeight": 7},
+            {"src": "Q2", "uniqueContentWeight": None},
+        ]
 
     @pytest.mark.asyncio
     async def test_empty_without_postgres(self):
