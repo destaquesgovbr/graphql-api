@@ -977,9 +977,21 @@ def _prune_ego_network(
     """Garante a ego-network sem órfãos: só ficam o foco e os vizinhos ligados a
     ele por aresta, e só as arestas entre esses nós. As duas queries escolhem o
     mesmo conjunto de vizinhos, mas a DAG pode recalcular `entity_edges` entre
-    elas."""
-    node_ids = {n.entity_id for n in nodes}
-    edges = [e for e in edges if e.src in node_ids and e.dst in node_ids]
+    elas. Também deduplica nós por id e arestas por par não-ordenado (mantém a
+    primeira, de maior peso): src_id < dst_id é convenção, sem CHECK no banco."""
+    unique_nodes: dict[str, EntityNetworkNodeRecord] = {}
+    for n in nodes:
+        unique_nodes.setdefault(n.entity_id, n)
+    nodes = list(unique_nodes.values())
+    node_ids = set(unique_nodes)
+    seen_pairs: set[frozenset[str]] = set()
+    unique_edges = []
+    for e in edges:
+        pair = frozenset((e.src, e.dst))
+        if pair not in seen_pairs and e.src in node_ids and e.dst in node_ids:
+            seen_pairs.add(pair)
+            unique_edges.append(e)
+    edges = unique_edges
     linked = {focus_id}
     for e in edges:
         if focus_id in (e.src, e.dst):
