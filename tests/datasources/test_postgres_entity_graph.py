@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from graphql_api.datasources.postgres import (
+    _CONTENT_DEDUP_KEY_SQL,
     _ENTITY_COVERAGE_SQL,
     _ENTITY_NETWORK_EDGES_SQL,
     _ENTITY_NETWORK_EGO_EDGES_SQL,
@@ -578,6 +579,15 @@ class TestEntityCoverageConteudoUnico:
         assert "ORDER BY n.published_at, ne.unique_id" in sql
         # Uma linha por artigo (PK de news_entities + joins 1:1): COUNT(*) é exato.
         assert "COUNT(*) FILTER (WHERE m.is_first) AS unique_content_count" in sql
+
+    def test_chave_de_dedup_isolada_numa_constante(self):
+        # A chave exata por content_hash quase não pega republicações entre
+        # órgãos (raramente idênticas byte a byte); trocar por uma chave de
+        # quase-duplicata deve mexer só nesta constante, sem mudar a API.
+        assert _CONTENT_DEDUP_KEY_SQL == "COALESCE(n.content_hash, ne.unique_id)"
+        sql = _flat(_ENTITY_COVERAGE_SQL)
+        assert f"PARTITION BY {_CONTENT_DEDUP_KEY_SQL}" in sql
+        assert sql.count("content_hash") == 1
 
     def test_sql_preserva_agregados_existentes(self):
         sql = _flat(_ENTITY_COVERAGE_SQL)
