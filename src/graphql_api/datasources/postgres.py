@@ -600,6 +600,15 @@ LEFT JOIN counts c ON c.day = d.day
 ORDER BY d.day
 """
 
+# Chave de "mesmo conteúdo" para o dedup de republicações no entityCoverage
+# (`n` = news, `ne` = news_entities). Hoje é o hash exato do conteúdo, que quase
+# não pega republicações entre órgãos (raramente idênticas byte a byte); uma
+# chave de quase-duplicata está em avaliação. Trocar a expressão aqui não muda a
+# API (`uniqueContentCount`), mas `entity_stats.unique_content_count` e
+# `entity_edges.unique_content_count` vêm da DAG do grafo no data-platform com a
+# mesma definição — mantenha as duas pontas alinhadas.
+_CONTENT_DEDUP_KEY_SQL = "COALESCE(n.content_hash, ne.unique_id)"
+
 # Série temporal de cobertura de uma entidade por agência e período.
 # `$1` = granularidade (day/week/month), `$2` = entity_id, `$3` = date_from
 # (NULL = sem limite inferior), `$4` = date_to (NULL = sem limite superior).
@@ -607,15 +616,15 @@ ORDER BY d.day
 # depender do TimeZone da sessão). `period` é truncado em UTC e formatado como o
 # `timestamptz::text` de uma sessão UTC ("2026-08-27 00:00:00+00"), formato que
 # os consumidores já parseiam.
-# `unique_content_count` credita cada conteúdo, COALESCE(content_hash,
-# unique_id), só à PRIMEIRA agência que o publicou dentro do intervalo
-# (ROW_NUMBER por published_at, unique_id): republicações não contam de novo e o
-# campo soma entre agências e períodos. `article_count` continua contando artigos.
+# `unique_content_count` credita cada conteúdo (`_CONTENT_DEDUP_KEY_SQL`) só à
+# PRIMEIRA agência que o publicou dentro do intervalo (ROW_NUMBER por
+# published_at, unique_id): republicações não contam de novo e o campo soma
+# entre agências e períodos. `article_count` continua contando artigos.
 # Uma linha por artigo: PK (unique_id, entity_id) em news_entities e joins 1:1
 # com news/news_features, então COUNT(*) = COUNT(DISTINCT unique_id) — e, sem
 # DISTINCT, o agregado pode ser por hash (o sort após a janela era o gargalo).
 # Score de sentimento aninhado com fallback plano (ver `_AGENCY_ANALYTICS_SQL`).
-_ENTITY_COVERAGE_SQL = """
+_ENTITY_COVERAGE_SQL = f"""
 WITH mentions AS (
     SELECT
         to_char(DATE_TRUNC($1, ne.published_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS"+00"') AS period,
@@ -624,7 +633,7 @@ WITH mentions AS (
         n.agency_name,
         COALESCE(nf.features->'sentiment'->>'score', nf.features->>'sentiment_score')::float AS sentiment_score,
         ROW_NUMBER() OVER (
-            PARTITION BY COALESCE(n.content_hash, ne.unique_id)
+            PARTITION BY {_CONTENT_DEDUP_KEY_SQL}
             ORDER BY n.published_at, ne.unique_id
         ) = 1 AS is_first
     FROM news_entities ne
