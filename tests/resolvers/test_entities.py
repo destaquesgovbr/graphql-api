@@ -50,6 +50,45 @@ class TestEntityCoverage:
         mock_pg.entity_coverage.assert_awaited_once_with("Q4294522", "month", None, None)
 
     @pytest.mark.asyncio
+    async def test_unique_content_count(self):
+        mock_pg = AsyncMock()
+        mock_pg.entity_coverage = AsyncMock(return_value=[
+            {
+                "period": "2026-10-01 00:00:00+00",
+                "agency_key": "mec",
+                "agency_name": "MEC",
+                "article_count": 3,
+                "unique_content_count": 2,
+                "total_mentions": 5,
+                "avg_sentiment_score": None,
+            },
+            # Só republicações: nenhum conteúdo creditado a esta agência.
+            {
+                "period": "2026-10-01 00:00:00+00",
+                "agency_key": "ebc",
+                "agency_name": "EBC",
+                "article_count": 2,
+                "unique_content_count": 0,
+                "total_mentions": 2,
+                "avg_sentiment_score": None,
+            },
+        ])
+        query = """
+        query {
+            entityCoverage(entityId: "Q1", dateFrom: "2026-10-01", dateTo: "2026-10-08", granularity: DAY) {
+                agencyKey articleCount uniqueContentCount
+            }
+        }
+        """
+        result = await test_schema.execute(query, context_value=_make_ctx(postgres_ds=mock_pg))
+        assert result.errors is None
+        assert result.data["entityCoverage"] == [
+            {"agencyKey": "mec", "articleCount": 3, "uniqueContentCount": 2},
+            {"agencyKey": "ebc", "articleCount": 2, "uniqueContentCount": 0},
+        ]
+        mock_pg.entity_coverage.assert_awaited_once_with("Q1", "day", "2026-10-01", "2026-10-08")
+
+    @pytest.mark.asyncio
     async def test_entity_id_vazio_retorna_lista_vazia(self):
         mock_pg = AsyncMock()
         mock_pg.entity_coverage = AsyncMock(return_value=[])
@@ -109,3 +148,9 @@ class TestEntityCoverageSDL:
         assert "dias UTC" in field.description
         assert "dateFrom inclusivo" in field.description
         assert "dateTo exclusivo" in field.description
+
+
+    def test_unique_content_count_no_sdl(self):
+        sdl = test_schema.as_str()
+        block = sdl.split("type EntityCoveragePoint {", 1)[1].split("}", 1)[0]
+        assert "uniqueContentCount: Int!" in block

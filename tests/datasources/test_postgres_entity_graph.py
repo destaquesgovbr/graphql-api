@@ -547,3 +547,21 @@ class TestEntityCoverageDatas:
             "to_char(DATE_TRUNC($1, ne.published_at AT TIME ZONE 'UTC'), "
             "'YYYY-MM-DD HH24:MI:SS\"+00\"') AS period"
         ) in sql
+
+
+class TestEntityCoverageConteudoUnico:
+    """uniqueContentCount: cada conteúdo (COALESCE(content_hash, unique_id)) é
+    creditado só à PRIMEIRA agência que o publicou no intervalo — o campo soma
+    entre agências e períodos sem contar republicações duas vezes."""
+
+    def test_sql_credita_a_primeira_publicacao(self):
+        sql = _flat(_ENTITY_COVERAGE_SQL)
+        assert "PARTITION BY COALESCE(n.content_hash, ne.unique_id)" in sql
+        assert "ORDER BY n.published_at, ne.unique_id" in sql
+        assert "COUNT(DISTINCT m.unique_id) FILTER (WHERE m.is_first) AS unique_content_count" in sql
+
+    def test_sql_preserva_agregados_existentes(self):
+        sql = _flat(_ENTITY_COVERAGE_SQL)
+        assert "COUNT(DISTINCT m.unique_id) AS article_count" in sql
+        assert "SUM(m.count) AS total_mentions" in sql
+        assert "GROUP BY period, m.agency_key, m.agency_name" in sql
