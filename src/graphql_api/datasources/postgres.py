@@ -35,6 +35,8 @@ class NewsRecord:
     most_specific_theme_code: Optional[str] = None
     most_specific_theme_label: Optional[str] = None
     features: Optional[dict[str, Any]] = None
+    # Chave de conteúdo EFETIVA (ver `_content_dedup_key`), não a coluna crua.
+    content_key: Optional[str] = None
 
 
 @dataclass
@@ -616,6 +618,20 @@ ORDER BY d.day
 # definição — mantenha as duas pontas alinhadas.
 _CONTENT_DEDUP_KEY_SQL = "COALESCE(n.content_key, n.content_hash, ne.unique_id)"
 
+
+def _content_dedup_key(row: dict) -> str:
+    """A chave de `_CONTENT_DEDUP_KEY_SQL` calculada em Python, para linhas de
+    `news` lidas com `n.*` (expostas como `Article.contentKey`).
+
+    Mesma precedência do COALESCE (só NULL cai para a próxima). Diferente do
+    SQL, não exige a coluna: antes da migração 035 o `n.*` não traz
+    `content_key` e a chave cai no `content_hash`."""
+    for column in ("content_key", "content_hash"):
+        value = row.get(column)
+        if value is not None:
+            return value
+    return row["unique_id"]
+
 # Série temporal de cobertura de uma entidade por agência e período.
 # `$1` = granularidade (day/week/month), `$2` = entity_id, `$3` = date_from
 # (NULL = sem limite inferior), `$4` = date_to (NULL = sem limite superior).
@@ -804,6 +820,7 @@ def _row_to_news_record(row: dict) -> NewsRecord:
         most_specific_theme_code=row.get("most_specific_theme_code"),
         most_specific_theme_label=row.get("most_specific_theme_label"),
         features=row.get("features"),
+        content_key=_content_dedup_key(row),
     )
 
 

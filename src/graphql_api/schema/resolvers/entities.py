@@ -45,6 +45,7 @@ def _news_record_to_article(record) -> Article:
         theme_1_level_3_label=record.theme_l3_label,
         most_specific_theme_code=record.most_specific_theme_code,
         most_specific_theme_label=record.most_specific_theme_label,
+        content_key=record.content_key,
     )
 
 

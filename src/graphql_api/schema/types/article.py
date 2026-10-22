@@ -38,6 +38,17 @@ class Article:
     theme_1_level_3_label: Optional[str] = None
     most_specific_theme_code: Optional[str] = None
     most_specific_theme_label: Optional[str] = None
+    content_key: Optional[str] = strawberry.field(
+        default=None,
+        description=(
+            "Chave de conteúdo para agrupar republicações: artigos com a mesma chave são o "
+            "mesmo conteúdo publicado por órgãos diferentes (quase-duplicatas). É a chave do "
+            "entityCoverage.uniqueContentCount: news.content_key (uniqueId do artigo-líder do "
+            "grupo); sem ela, o hash exato do conteúdo; sem ele, o próprio uniqueId. Preenchida "
+            "só nos caminhos servidos pelo Postgres (entityArticles); null nas listas e na busca "
+            "servidas pelo Typesense, que ainda não indexa a chave."
+        ),
+    )
 
     @strawberry.field(description="Hora de publicação (0-23), derivada de publishedAt")
     def publication_hour(self) -> Optional[int]:

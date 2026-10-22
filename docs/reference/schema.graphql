@@ -121,6 +121,11 @@ type Article {
   mostSpecificThemeCode: String
   mostSpecificThemeLabel: String
 
+  """
+  Chave de conteúdo para agrupar republicações: artigos com a mesma chave são o mesmo conteúdo publicado por órgãos diferentes (quase-duplicatas). É a chave do entityCoverage.uniqueContentCount: news.content_key (uniqueId do artigo-líder do grupo); sem ela, o hash exato do conteúdo; sem ele, o próprio uniqueId. Preenchida só nos caminhos servidos pelo Postgres (entityArticles); null nas listas e na busca servidas pelo Typesense, que ainda não indexa a chave.
+  """
+  contentKey: String
+
   """Hora de publicação (0-23), derivada de publishedAt"""
   publicationHour: Int
 
