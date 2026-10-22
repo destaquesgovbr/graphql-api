@@ -29,9 +29,11 @@ class EntityCoveragePoint:
     unique_content_count: int = strawberry.field(
         default=0,
         description=(
-            "Conteúdos distintos (content_hash) creditados a esta agência: cada conteúdo conta só "
-            "para a primeira agência que o publicou no intervalo consultado, então o campo soma "
-            "entre agências e períodos sem contar republicações. articleCount conta artigos."
+            "Conteúdos distintos creditados a esta agência: cada conteúdo conta só para a primeira "
+            "agência que o publicou no intervalo consultado, então o campo soma entre agências e "
+            "períodos sem contar republicações. Republicações quase-duplicatas (mesma chave "
+            "news.content_key; sem ela, o mesmo content_hash) são o mesmo conteúdo. articleCount "
+            "conta artigos."
         ),
     )
 

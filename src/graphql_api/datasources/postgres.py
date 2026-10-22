@@ -601,13 +601,20 @@ ORDER BY d.day
 """
 
 # Chave de "mesmo conteúdo" para o dedup de republicações no entityCoverage
-# (`n` = news, `ne` = news_entities). Hoje é o hash exato do conteúdo, que quase
-# não pega republicações entre órgãos (raramente idênticas byte a byte); uma
-# chave de quase-duplicata está em avaliação. Trocar a expressão aqui não muda a
-# API (`uniqueContentCount`), mas `entity_stats.unique_content_count` e
-# `entity_edges.unique_content_count` vêm da DAG do grafo no data-platform com a
-# mesma definição — mantenha as duas pontas alinhadas.
-_CONTENT_DEDUP_KEY_SQL = "COALESCE(n.content_hash, ne.unique_id)"
+# (`n` = news, `ne` = news_entities). `news.content_key` (migração 035 do
+# data-platform) agrupa quase-duplicatas: é o `unique_id` do artigo-líder do
+# grupo, calculado em lote pela tarefa `compute_content_keys` da DAG do grafo.
+# O hash exato (`content_hash`) só vale para linhas ainda sem chave (antes do
+# backfill ou recém-ingeridas); ele quase não pega republicações entre órgãos,
+# porque cada órgão reescreve as URLs de imagem e de link. Os espaços de chave
+# não colidem (unique_id do líder contra hash de 16 hex).
+# EXIGE a coluna `news.content_key`: sem a migração 035 aplicada, o
+# entityCoverage falha com "column n.content_key does not exist".
+# Trocar a expressão aqui não muda a API (`uniqueContentCount`), mas
+# `entity_stats.unique_content_count` e `entity_edges.unique_content_count` vêm
+# da DAG do grafo no data-platform (`ARTICLE_CONTENT_KEY_SQL`) com a mesma
+# definição — mantenha as duas pontas alinhadas.
+_CONTENT_DEDUP_KEY_SQL = "COALESCE(n.content_key, n.content_hash, ne.unique_id)"
 
 # Série temporal de cobertura de uma entidade por agência e período.
 # `$1` = granularidade (day/week/month), `$2` = entity_id, `$3` = date_from
