@@ -71,6 +71,10 @@ class EntityRegistryRecord:
     wikidata_url: Optional[str] = None
     description: Optional[str] = None
     agency_key: Optional[str] = None
+    # GQL-1: `entity_stats` (migração 032); None sem estatística calculada.
+    # Só `_ENTITY_REGISTRY_SQL` (entity(id)) junta; o batch deixa None.
+    article_count: Optional[int] = None
+    unique_content_count: Optional[int] = None
 
 
 @dataclass
@@ -87,26 +91,50 @@ class RelatedEntityRecord:
     wikidata_id: Optional[str] = None
     weight: int = 0
     kind: str = "co_mention"
+    # GQL-1 (migração 032): stats do vizinho, co-menções com conteúdo distinto e
+    # lift da aresta. None quando falta estatística (ver `_RELATED_ENTITIES_SQL`).
+    article_count: Optional[int] = None
+    unique_content_count: Optional[int] = None
+    unique_content_weight: Optional[int] = None
+    lift: Optional[float] = None
+
+
+@dataclass
+class EntityGraphStatsRecord:
+    """Totais do grafo de entidades (`entity_graph_meta`, linha única id=1)."""
+
+    total_articles: int
+    total_unique_content: int
+    computed_at: Optional[datetime] = None
 
 
 @dataclass
 class EntityNetworkNodeRecord:
-    """Nó da ego-network de uma entidade (Fase 6c)."""
+    """Nó da ego-network de uma entidade (Fase 6c).
+
+    `article_count`/`unique_content_count` vêm de `entity_stats` (migração 032
+    do data-platform); None quando a entidade ainda não tem estatística."""
 
     entity_id: str
     canonical_name: Optional[str] = None
     type: Optional[str] = None
     wikidata_id: Optional[str] = None
+    article_count: Optional[int] = None
+    unique_content_count: Optional[int] = None
 
 
 @dataclass
 class EntityNetworkEdgeRecord:
-    """Aresta da ego-network (Fase 6c). `src`/`dst` são entity_ids."""
+    """Aresta da ego-network (Fase 6c). `src`/`dst` são entity_ids.
+
+    `unique_content_weight` = co-menções com conteúdo distinto
+    (`entity_edges.unique_content_count`, migração 032); None antes do cálculo."""
 
     src: str
     dst: str
     weight: int = 0
     kind: str = "co_mention"
+    unique_content_weight: Optional[int] = None
 
 
 @dataclass
@@ -157,10 +185,13 @@ WHERE unique_id = ANY($1)
 # (asyncpg devolve como str → json.loads). `description`/`wikidata_*` podem ser
 # nulos quando a entidade não foi linkada ao Wikidata.
 _ENTITY_REGISTRY_SQL = """
-SELECT entity_id, canonical_name, type, aliases,
-  wikidata_id, wikidata_url, description, agency_key
-FROM entity_registry
-WHERE entity_id = $1
+SELECT r.entity_id, r.canonical_name, r.type, r.aliases,
+  r.wikidata_id, r.wikidata_url, r.description, r.agency_key,
+  s.article_count AS article_count,
+  s.unique_content_count AS unique_content_count
+FROM entity_registry r
+LEFT JOIN entity_stats s ON s.entity_id = r.entity_id
+WHERE r.entity_id = $1
 """
 
 _ENTITY_REGISTRY_BATCH_SQL = """
@@ -174,24 +205,75 @@ WHERE entity_id = ANY($1)
 # `entity_edges` onde a entidade aparece em qualquer ponta (src_id OU dst_id),
 # pega a "outra ponta" e junta com `entity_registry` para hidratar
 # nome/tipo/wikidata. `entity_id` SEMPRE como `$1` parametrizado (sem
-# interpolação — risco de injection). Ordenado por weight desc; LIMIT em $2.
-# A ordem canônica src_id < dst_id em entity_edges garante 1 linha por par.
+# interpolação — risco de injection). LIMIT em $2. A ordem canônica
+# src_id < dst_id em entity_edges garante 1 linha por par.
+#
+# GQL-1: `$4` = peso mínimo da aresta; `$3` = ordenação (whitelist no
+# datasource): 'weight' (legado), 'unique_content' (co-menções com conteúdo
+# distinto) ou 'lift' = weight·N / (cnt_ego·cnt_vizinho), com N =
+# entity_graph_meta.total_articles e cnt = entity_stats.article_count — NULL se
+# qualquer termo faltar ou for 0 (NULLIF). Nulos vão para o fim e o desempate é
+# sempre weight desc, other_id asc (com 'weight', a ordem legada).
 _RELATED_ENTITIES_SQL = """
-SELECT
-  CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END AS other_id,
-  e.weight AS weight,
-  e.kind AS kind,
-  r.canonical_name AS canonical_name,
-  r.type AS type,
-  r.wikidata_id AS wikidata_id
-FROM entity_edges e
-JOIN entity_registry r
-  ON r.entity_id = CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END
-WHERE e.kind = 'co_mention'
-  AND ($1 IN (e.src_id, e.dst_id))
-ORDER BY e.weight DESC, other_id ASC
+WITH neighbors AS (
+  SELECT
+    CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END AS other_id,
+    e.weight AS weight,
+    e.kind AS kind,
+    e.unique_content_count AS unique_content_weight
+  FROM entity_edges e
+  WHERE e.kind = 'co_mention'
+    AND ($1 IN (e.src_id, e.dst_id))
+    AND e.weight >= $4
+),
+scored AS (
+  SELECT
+    nb.other_id,
+    nb.weight,
+    nb.kind,
+    nb.unique_content_weight,
+    r.canonical_name AS canonical_name,
+    r.type AS type,
+    r.wikidata_id AS wikidata_id,
+    so.article_count AS article_count,
+    so.unique_content_count AS unique_content_count,
+    nb.weight::float8 * NULLIF(m.total_articles, 0)
+      / (NULLIF(se.article_count, 0)::float8 * NULLIF(so.article_count, 0)) AS lift
+  FROM neighbors nb
+  JOIN entity_registry r ON r.entity_id = nb.other_id
+  LEFT JOIN entity_stats so ON so.entity_id = nb.other_id
+  LEFT JOIN entity_stats se ON se.entity_id = $1
+  LEFT JOIN entity_graph_meta m ON m.id = 1
+)
+SELECT other_id, weight, kind, unique_content_weight, canonical_name, type,
+  wikidata_id, article_count, unique_content_count, lift
+FROM scored
+ORDER BY
+  CASE $3::text
+    WHEN 'lift' THEN lift
+    WHEN 'unique_content' THEN unique_content_weight::float8
+    ELSE weight::float8
+  END DESC NULLS LAST,
+  weight DESC, other_id ASC
 LIMIT $2
 """
+
+# Totais do grafo (linha única id=1), recalculados pela DAG junto com
+# entity_stats (migração 032). N do lift.
+_ENTITY_GRAPH_STATS_SQL = """
+SELECT total_articles, total_unique_content, computed_at
+FROM entity_graph_meta
+WHERE id = 1
+"""
+
+# Ordenações aceitas por `get_related_entities` ($3 de `_RELATED_ENTITIES_SQL`).
+_RELATED_ENTITY_ORDERS = frozenset({"weight", "unique_content", "lift"})
+
+# Limites da ego-network centrada (GQL-1). Peso 1 = uma única co-menção (ruído).
+_EGO_MIN_WEIGHT = 2
+_EGO_DEFAULT_MAX_NODES = 30
+_EGO_MAX_NODES = 100
+_EGO_MAX_NEIGHBOR_EDGES = 500
 
 # Fase 6c — ego-network multi-hop (depth<=2) via CTE recursiva em `entity_edges`.
 # Parte de `$1` (parametrizado), expande pelas arestas de co-menção até `$2`
@@ -216,9 +298,12 @@ SELECT DISTINCT
   r.entity_id AS entity_id,
   r.canonical_name AS canonical_name,
   r.type AS type,
-  r.wikidata_id AS wikidata_id
+  r.wikidata_id AS wikidata_id,
+  s.article_count AS article_count,
+  s.unique_content_count AS unique_content_count
 FROM (SELECT DISTINCT entity_id FROM reachable) ni
 JOIN entity_registry r ON r.entity_id = ni.entity_id
+LEFT JOIN entity_stats s ON s.entity_id = r.entity_id
 """
 
 _ENTITY_NETWORK_EDGES_SQL = """
@@ -237,13 +322,83 @@ WITH RECURSIVE reachable(entity_id, depth) AS (
 node_ids AS (
   SELECT DISTINCT entity_id FROM reachable
 )
-SELECT e.src_id AS src, e.dst_id AS dst, e.weight AS weight, e.kind AS kind
+SELECT e.src_id AS src, e.dst_id AS dst, e.weight AS weight, e.kind AS kind,
+  e.unique_content_count AS unique_content_weight
 FROM entity_edges e
 WHERE e.kind = 'co_mention'
   AND e.src_id IN (SELECT entity_id FROM node_ids)
   AND e.dst_id IN (SELECT entity_id FROM node_ids)
 ORDER BY e.weight DESC
 LIMIT $3
+"""
+
+# GQL-1 — ego-network centrada no foco (`egoCentered`). A rede legada acima
+# corta as arestas pelo peso global, e as arestas fortes ENTRE vizinhos expulsam
+# as do próprio foco. Aqui os vizinhos são as top `$2` arestas do foco `$1` com
+# weight >= `$3` (ordem determinística weight desc, id asc), e TODAS essas
+# arestas do foco entram; só as arestas entre vizinhos (`$4` liga/desliga) são
+# cortadas em `$5`. Nós e arestas são duas queries com o MESMO CTE `neighbors`
+# (mesma ordem + LIMIT ⇒ mesmo conjunto); o datasource ainda poda órfãos caso o
+# grafo mude entre elas. Foco primeiro (weight NULL), vizinhos por peso.
+_ENTITY_NETWORK_EGO_NODES_SQL = """
+WITH neighbors AS (
+  SELECT
+    CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END AS other_id,
+    e.weight AS weight
+  FROM entity_edges e
+  WHERE e.kind = 'co_mention'
+    AND $1 IN (e.src_id, e.dst_id)
+    AND e.weight >= $3
+  ORDER BY e.weight DESC, other_id ASC
+  LIMIT $2
+),
+node_ids AS (
+  SELECT $1::varchar AS entity_id, NULL::int AS weight
+  UNION ALL
+  SELECT other_id, weight FROM neighbors
+)
+SELECT
+  r.entity_id AS entity_id,
+  r.canonical_name AS canonical_name,
+  r.type AS type,
+  r.wikidata_id AS wikidata_id,
+  s.article_count AS article_count,
+  s.unique_content_count AS unique_content_count
+FROM node_ids ni
+JOIN entity_registry r ON r.entity_id = ni.entity_id
+LEFT JOIN entity_stats s ON s.entity_id = r.entity_id
+ORDER BY ni.weight DESC NULLS FIRST, r.entity_id ASC
+"""
+
+_ENTITY_NETWORK_EGO_EDGES_SQL = """
+WITH neighbors AS (
+  SELECT
+    CASE WHEN e.src_id = $1 THEN e.dst_id ELSE e.src_id END AS other_id,
+    e.src_id, e.dst_id, e.weight, e.kind, e.unique_content_count
+  FROM entity_edges e
+  WHERE e.kind = 'co_mention'
+    AND $1 IN (e.src_id, e.dst_id)
+    AND e.weight >= $3
+  ORDER BY e.weight DESC, other_id ASC
+  LIMIT $2
+),
+neighbor_edges AS (
+  SELECT e.src_id, e.dst_id, e.weight, e.kind, e.unique_content_count
+  FROM entity_edges e
+  WHERE $4::boolean
+    AND e.kind = 'co_mention'
+    AND e.weight >= $3
+    AND e.src_id IN (SELECT other_id FROM neighbors)
+    AND e.dst_id IN (SELECT other_id FROM neighbors)
+  ORDER BY e.weight DESC, e.src_id ASC, e.dst_id ASC
+  LIMIT $5
+)
+SELECT src_id AS src, dst_id AS dst, weight, kind, unique_content_count AS unique_content_weight
+FROM neighbors
+UNION ALL
+SELECT src_id AS src, dst_id AS dst, weight, kind, unique_content_count AS unique_content_weight
+FROM neighbor_edges
+ORDER BY weight DESC, src ASC, dst ASC
 """
 
 _NEWS_BASE_SQL = """
@@ -329,6 +484,9 @@ LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
 # legado. O LATERAL `s` resolve os dois com COALESCE (aninhado primeiro).
 # `pct_positive`/`pct_negative` = fração dos artigos COM rótulo; NULL quando
 # nenhum artigo do grupo tem rótulo (nulo ≠ zero).
+# Legibilidade: `readability_flesch` é a fórmula inglesa (legado);
+# `readability_flesch_ptbr` (Martins/1996, GQL-1) vem com a contagem de artigos
+# que o têm, para o consumidor medir a cobertura do backfill.
 _AGENCY_ANALYTICS_SQL = """
 SELECT
     DATE_TRUNC($1, n.published_at)::text AS period,
@@ -339,6 +497,8 @@ SELECT
     AVG(CASE WHEN s.label = 'positive' THEN 1.0 WHEN s.label IS NOT NULL THEN 0.0 END) AS pct_positive,
     AVG(CASE WHEN s.label = 'negative' THEN 1.0 WHEN s.label IS NOT NULL THEN 0.0 END) AS pct_negative,
     AVG((nf.features->>'readability_flesch')::float) AS avg_readability_flesch,
+    AVG((nf.features->>'readability_flesch_ptbr')::float) AS avg_readability_flesch_ptbr,
+    COUNT(nf.features->>'readability_flesch_ptbr') AS readability_flesch_ptbr_count,
     AVG((nf.features->>'word_count')::float) AS avg_word_count
 FROM news n
 LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
@@ -376,6 +536,8 @@ daily_agg AS (
         AVG(CASE WHEN s.label = 'positive' THEN 1.0 WHEN s.label IS NOT NULL THEN 0.0 END) AS pct_positive,
         AVG(CASE WHEN s.label = 'negative' THEN 1.0 WHEN s.label IS NOT NULL THEN 0.0 END) AS pct_negative,
         AVG((nf.features->>'readability_flesch')::float) AS avg_readability_flesch,
+        AVG((nf.features->>'readability_flesch_ptbr')::float) AS avg_readability_flesch_ptbr,
+        COUNT(nf.features->>'readability_flesch_ptbr') AS readability_flesch_ptbr_count,
         AVG((nf.features->>'word_count')::float) AS avg_word_count
     FROM news n
     LEFT JOIN news_features nf ON n.unique_id = nf.unique_id
@@ -397,6 +559,8 @@ SELECT
     da.pct_positive,
     da.pct_negative,
     da.avg_readability_flesch,
+    da.avg_readability_flesch_ptbr,
+    COALESCE(da.readability_flesch_ptbr_count, 0) AS readability_flesch_ptbr_count,
     da.avg_word_count
 FROM date_series ds
 CROSS JOIN agency_names an
@@ -436,25 +600,59 @@ LEFT JOIN counts c ON c.day = d.day
 ORDER BY d.day
 """
 
+# Chave de "mesmo conteúdo" para o dedup de republicações no entityCoverage
+# (`n` = news, `ne` = news_entities). Hoje é o hash exato do conteúdo, que quase
+# não pega republicações entre órgãos (raramente idênticas byte a byte); uma
+# chave de quase-duplicata está em avaliação. Trocar a expressão aqui não muda a
+# API (`uniqueContentCount`), mas `entity_stats.unique_content_count` e
+# `entity_edges.unique_content_count` vêm da DAG do grafo no data-platform com a
+# mesma definição — mantenha as duas pontas alinhadas.
+_CONTENT_DEDUP_KEY_SQL = "COALESCE(n.content_hash, ne.unique_id)"
+
 # Série temporal de cobertura de uma entidade por agência e período.
 # `$1` = granularidade (day/week/month), `$2` = entity_id, `$3` = date_from
 # (NULL = sem limite inferior), `$4` = date_to (NULL = sem limite superior).
+# Dias UTC: `$3` inclusivo e `$4` EXCLUSIVO (meia-noite UTC de cada data, sem
+# depender do TimeZone da sessão). `period` é truncado em UTC e formatado como o
+# `timestamptz::text` de uma sessão UTC ("2026-08-27 00:00:00+00"), formato que
+# os consumidores já parseiam.
+# `unique_content_count` credita cada conteúdo (`_CONTENT_DEDUP_KEY_SQL`) só à
+# PRIMEIRA agência que o publicou dentro do intervalo (ROW_NUMBER por
+# published_at, unique_id): republicações não contam de novo e o campo soma
+# entre agências e períodos. `article_count` continua contando artigos.
+# Uma linha por artigo: PK (unique_id, entity_id) em news_entities e joins 1:1
+# com news/news_features, então COUNT(*) = COUNT(DISTINCT unique_id) — e, sem
+# DISTINCT, o agregado pode ser por hash (o sort após a janela era o gargalo).
 # Score de sentimento aninhado com fallback plano (ver `_AGENCY_ANALYTICS_SQL`).
-_ENTITY_COVERAGE_SQL = """
+_ENTITY_COVERAGE_SQL = f"""
+WITH mentions AS (
+    SELECT
+        to_char(DATE_TRUNC($1, ne.published_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS"+00"') AS period,
+        ne.count,
+        n.agency_key,
+        n.agency_name,
+        COALESCE(nf.features->'sentiment'->>'score', nf.features->>'sentiment_score')::float AS sentiment_score,
+        ROW_NUMBER() OVER (
+            PARTITION BY {_CONTENT_DEDUP_KEY_SQL}
+            ORDER BY n.published_at, ne.unique_id
+        ) = 1 AS is_first
+    FROM news_entities ne
+    JOIN news n ON ne.unique_id = n.unique_id
+    LEFT JOIN news_features nf ON ne.unique_id = nf.unique_id
+    WHERE ne.entity_id = $2
+      AND ($3::date IS NULL OR ne.published_at >= ($3::date)::timestamp AT TIME ZONE 'UTC')
+      AND ($4::date IS NULL OR ne.published_at < ($4::date)::timestamp AT TIME ZONE 'UTC')
+)
 SELECT
-    DATE_TRUNC($1, ne.published_at)::text AS period,
-    n.agency_key,
-    n.agency_name,
-    COUNT(DISTINCT ne.unique_id) AS article_count,
-    SUM(ne.count) AS total_mentions,
-    AVG(COALESCE(nf.features->'sentiment'->>'score', nf.features->>'sentiment_score')::float) AS avg_sentiment_score
-FROM news_entities ne
-JOIN news n ON ne.unique_id = n.unique_id
-LEFT JOIN news_features nf ON ne.unique_id = nf.unique_id
-WHERE ne.entity_id = $2
-  AND ($3::timestamptz IS NULL OR ne.published_at >= $3::timestamptz)
-  AND ($4::timestamptz IS NULL OR ne.published_at <= $4::timestamptz)
-GROUP BY period, n.agency_key, n.agency_name
+    m.period,
+    m.agency_key,
+    m.agency_name,
+    COUNT(*) AS article_count,
+    COUNT(*) FILTER (WHERE m.is_first) AS unique_content_count,
+    SUM(m.count) AS total_mentions,
+    AVG(m.sentiment_score) AS avg_sentiment_score
+FROM mentions m
+GROUP BY period, m.agency_key, m.agency_name
 ORDER BY period
 """
 
@@ -722,6 +920,16 @@ def _coerce_alias_list(raw: Any) -> list[str]:
     return out
 
 
+def _as_optional_int(value: Any) -> Optional[int]:
+    return None if value is None else int(value)
+
+
+def _as_optional_float(value: Any) -> Optional[float]:
+    """Decimal/numérico do asyncpg → float (o Float do graphql-core 3.3 rejeita
+    Decimal); None passa."""
+    return None if value is None else float(value)
+
+
 def _row_to_entity_registry(row: dict) -> EntityRegistryRecord:
     return EntityRegistryRecord(
         entity_id=row["entity_id"],
@@ -732,6 +940,8 @@ def _row_to_entity_registry(row: dict) -> EntityRegistryRecord:
         wikidata_url=row.get("wikidata_url"),
         description=row.get("description"),
         agency_key=row.get("agency_key"),
+        article_count=_as_optional_int(row.get("article_count")),
+        unique_content_count=_as_optional_int(row.get("unique_content_count")),
     )
 
 
@@ -743,6 +953,10 @@ def _row_to_related_entity(row: dict) -> RelatedEntityRecord:
         wikidata_id=row.get("wikidata_id"),
         weight=row.get("weight") or 0,
         kind=row.get("kind") or "co_mention",
+        article_count=_as_optional_int(row.get("article_count")),
+        unique_content_count=_as_optional_int(row.get("unique_content_count")),
+        unique_content_weight=_as_optional_int(row.get("unique_content_weight")),
+        lift=_as_optional_float(row.get("lift")),
     )
 
 
@@ -752,6 +966,8 @@ def _row_to_network_node(row: dict) -> EntityNetworkNodeRecord:
         canonical_name=row.get("canonical_name"),
         type=row.get("type"),
         wikidata_id=row.get("wikidata_id"),
+        article_count=_as_optional_int(row.get("article_count")),
+        unique_content_count=_as_optional_int(row.get("unique_content_count")),
     )
 
 
@@ -761,6 +977,40 @@ def _row_to_network_edge(row: dict) -> EntityNetworkEdgeRecord:
         dst=row["dst"],
         weight=row.get("weight") or 0,
         kind=row.get("kind") or "co_mention",
+        unique_content_weight=_as_optional_int(row.get("unique_content_weight")),
+    )
+
+
+def _prune_ego_network(
+    focus_id: str,
+    nodes: list[EntityNetworkNodeRecord],
+    edges: list[EntityNetworkEdgeRecord],
+) -> EntityNetworkRecord:
+    """Garante a ego-network sem órfãos: só ficam o foco e os vizinhos ligados a
+    ele por aresta, e só as arestas entre esses nós. As duas queries escolhem o
+    mesmo conjunto de vizinhos, mas a DAG pode recalcular `entity_edges` entre
+    elas. Também deduplica nós por id e arestas por par não-ordenado (mantém a
+    primeira, de maior peso): src_id < dst_id é convenção, sem CHECK no banco."""
+    unique_nodes: dict[str, EntityNetworkNodeRecord] = {}
+    for n in nodes:
+        unique_nodes.setdefault(n.entity_id, n)
+    nodes = list(unique_nodes.values())
+    node_ids = set(unique_nodes)
+    seen_pairs: set[frozenset[str]] = set()
+    unique_edges = []
+    for e in edges:
+        pair = frozenset((e.src, e.dst))
+        if pair not in seen_pairs and e.src in node_ids and e.dst in node_ids:
+            seen_pairs.add(pair)
+            unique_edges.append(e)
+    edges = unique_edges
+    linked = {focus_id}
+    for e in edges:
+        if focus_id in (e.src, e.dst):
+            linked.add(e.dst if e.src == focus_id else e.src)
+    return EntityNetworkRecord(
+        nodes=[n for n in nodes if n.entity_id in linked],
+        edges=[e for e in edges if e.src in linked and e.dst in linked],
     )
 
 
@@ -931,33 +1181,78 @@ class PostgresDatasource:
         return result
 
     async def get_related_entities(
-        self, entity_id: str, limit: int = 12
+        self,
+        entity_id: str,
+        limit: int = 12,
+        order_by: str = "weight",
+        min_weight: int = 1,
     ) -> list[RelatedEntityRecord]:
         """Vizinhos 1-hop de `entity_id` na rede de co-menção (Fase 6c).
 
         Lê `entity_edges` (kind=co_mention) onde a entidade aparece em qualquer
         ponta, pega a "outra ponta" e junta com `entity_registry` para hidratar
-        nome/tipo/wikidata. Ordenado por weight desc; até `limit`. `entity_id`
+        nome/tipo/wikidata, e com `entity_stats`/`entity_graph_meta` para as
+        estatísticas e o lift (GQL-1). Só arestas com weight >= `min_weight`
+        (mínimo 1; o default 1 é a lista legada). `order_by`: 'weight'
+        (default), 'unique_content' ou 'lift' (nulos por último; desempate
+        weight desc). Até `limit`. `entity_id`
         sempre parametrizado ($1) — nunca interpolado (anti-injection)."""
+        if order_by not in _RELATED_ENTITY_ORDERS:
+            raise ValueError(f"order_by inválido: {order_by!r}")
         if not entity_id:
             return []
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(_RELATED_ENTITIES_SQL, entity_id, limit)
+            rows = await conn.fetch(
+                _RELATED_ENTITIES_SQL,
+                entity_id,
+                limit,
+                order_by,
+                max(1, int(min_weight)),
+            )
         return [_row_to_related_entity(dict(r)) for r in rows]
 
+    async def get_entity_graph_stats(self) -> Optional[EntityGraphStatsRecord]:
+        """Totais do grafo de entidades (`entity_graph_meta`); None sem linha
+        (DAG ainda não rodou após a migração 032)."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(_ENTITY_GRAPH_STATS_SQL)
+        if row is None:
+            return None
+        return EntityGraphStatsRecord(
+            total_articles=int(row["total_articles"]),
+            total_unique_content=int(row["total_unique_content"]),
+            computed_at=row["computed_at"],
+        )
+
     async def get_entity_network(
-        self, entity_id: str, depth: int = 1, limit: int = 50
+        self,
+        entity_id: str,
+        depth: int = 1,
+        limit: int = 50,
+        ego_centered: bool = False,
+        max_nodes: int = _EGO_DEFAULT_MAX_NODES,
+        include_neighbor_edges: bool = True,
     ) -> EntityNetworkRecord:
         """Ego-network (nós + arestas) ao redor de `entity_id` (Fase 6c).
 
-        CTE recursiva em `entity_edges` (kind=co_mention), travessia
-        não-direcionada até `depth` saltos. `depth` é CLAMPado a [0, 2] aqui
-        (profundidades maiores ficam para o Neo4j numa iteração futura). `limit`
-        limita o nº de arestas (cap de tamanho do grafo). `entity_id` sempre
-        parametrizado ($1) — nunca interpolado (anti-injection). Nós e arestas
-        em duas queries que compartilham a mesma CTE."""
+        Modo legado (default): CTE recursiva em `entity_edges` (kind=co_mention),
+        travessia não-direcionada até `depth` saltos. `depth` é CLAMPado a [0, 2]
+        aqui (profundidades maiores ficam para o Neo4j numa iteração futura).
+        `limit` limita o nº de arestas (cap de tamanho do grafo). Nós e arestas
+        em duas queries que compartilham a mesma CTE.
+
+        `ego_centered=True` (GQL-1): foco + top `max_nodes` (1–100) vizinhos por
+        peso (>= 2), com todas as arestas do foco; `limit` (1–500) corta só as
+        arestas entre vizinhos (`include_neighbor_edges`). `depth` é ignorado.
+
+        `entity_id` sempre parametrizado ($1) — nunca interpolado
+        (anti-injection)."""
         if not entity_id:
             return EntityNetworkRecord(nodes=[], edges=[])
+        if ego_centered:
+            return await self._get_ego_network(
+                entity_id, max_nodes, limit, include_neighbor_edges
+            )
         # Clamp defensivo: depth no máximo 2 (e mínimo 0).
         safe_depth = max(0, min(int(depth), 2))
         async with self._pool.acquire() as conn:
@@ -970,6 +1265,33 @@ class PostgresDatasource:
         return EntityNetworkRecord(
             nodes=[_row_to_network_node(dict(r)) for r in node_rows],
             edges=[_row_to_network_edge(dict(r)) for r in edge_rows],
+        )
+
+    async def _get_ego_network(
+        self,
+        entity_id: str,
+        max_nodes: int,
+        limit: int,
+        include_neighbor_edges: bool,
+    ) -> EntityNetworkRecord:
+        safe_nodes = max(1, min(int(max_nodes), _EGO_MAX_NODES))
+        safe_limit = max(1, min(int(limit), _EGO_MAX_NEIGHBOR_EDGES))
+        async with self._pool.acquire() as conn:
+            node_rows = await conn.fetch(
+                _ENTITY_NETWORK_EGO_NODES_SQL, entity_id, safe_nodes, _EGO_MIN_WEIGHT
+            )
+            edge_rows = await conn.fetch(
+                _ENTITY_NETWORK_EGO_EDGES_SQL,
+                entity_id,
+                safe_nodes,
+                _EGO_MIN_WEIGHT,
+                bool(include_neighbor_edges),
+                safe_limit,
+            )
+        return _prune_ego_network(
+            entity_id,
+            [_row_to_network_node(dict(r)) for r in node_rows],
+            [_row_to_network_edge(dict(r)) for r in edge_rows],
         )
 
     async def get_news_for_typesense(self, unique_id: str) -> Optional[TypesenseDocRecord]:
@@ -1103,10 +1425,12 @@ class PostgresDatasource:
         Parâmetros:
         - `entity_id`: QID Wikidata ou `dgb_<ulid>` da entidade.
         - `granularity`: resolução temporal — `day`, `week` ou `month` (padrão).
-        - `date_from`/`date_to`: filtros de data ISO 8601 (None = sem limite).
+        - `date_from`/`date_to`: datas ISO `AAAA-MM-DD` em dias UTC (None = sem
+          limite); `date_from` inclusivo, `date_to` exclusivo.
 
         Retorna lista de dicts com chaves: `period`, `agency_key`, `agency_name`,
-        `article_count`, `total_mentions`, `avg_sentiment_score`.
+        `article_count`, `unique_content_count`, `total_mentions`,
+        `avg_sentiment_score`.
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(

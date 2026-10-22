@@ -37,9 +37,23 @@ type AgencyPeriodMetrics {
   Fração (0 a 1) dos artigos COM rótulo de sentimento que são negativos. Null se nenhum tem.
   """
   pctNegative: Float
+
+  """
+  Média do Flesch pela fórmula inglesa (legado; escala distorcida para português).
+  """
   avgReadabilityFlesch: Float
   avgWordCount: Float
   topThemes: [ThemeStats!]!
+
+  """
+  Média do Flesch adaptado ao português (Martins et al., 1996) dos artigos que o têm. Null quando nenhum tem.
+  """
+  avgReadabilityFleschPtbr: Float
+
+  """
+  Nº de artigos do grupo com Flesch pt-BR calculado (base de avgReadabilityFleschPtbr).
+  """
+  readabilityFleschPtbrCount: Int
 }
 
 """Agency statistics with article count"""
@@ -134,7 +148,16 @@ type ArticleFeatures {
   uniqueSessions: Int
   trendingScore: Float
   wordCount: Int
+
+  """
+  Índice de Flesch pela fórmula inglesa (legado; escala distorcida para português).
+  """
   readabilityFlesch: Float
+
+  """
+  Índice de Flesch adaptado ao português (Martins et al., 1996): 0–100, maior = mais fácil. Null até o artigo ser recalculado.
+  """
+  readabilityFleschPtbr: Float
 }
 
 input ArticleFilter {
@@ -160,9 +183,19 @@ enum ArticleSort {
 type ArticleSummary {
   uniqueId: String!
   title: String!
+
+  """
+  Key da agência (o mesmo valor de agencyKey, apesar do nome). Mantido por compatibilidade.
+  """
   agencyName: String
   publishedAt: String
   trendingScore: Float
+
+  """Link do artigo no portal de origem."""
+  url: String
+
+  """Key da agência (ex.: 'saude')."""
+  agencyKey: String
 }
 
 type ArticlesResult {
@@ -303,6 +336,11 @@ type EntityCoveragePoint {
   articleCount: Int!
   totalMentions: Int!
   avgSentimentScore: Float
+
+  """
+  Conteúdos distintos (content_hash) creditados a esta agência: cada conteúdo conta só para a primeira agência que o publicou no intervalo consultado, então o campo soma entre agências e períodos sem contar republicações. articleCount conta artigos.
+  """
+  uniqueContentCount: Int!
 }
 
 type EntityFacet {
@@ -310,6 +348,15 @@ type EntityFacet {
   count: Int!
   entityId: String
   label: String
+}
+
+"""
+Totais do grafo de entidades (entity_graph_meta), recalculados pela DAG do grafo; N do lift de `relatedEntities`.
+"""
+type EntityGraphStats {
+  totalArticles: Int!
+  totalUniqueContent: Int!
+  computedAt: DateTime
 }
 
 enum EntityKind {
@@ -331,6 +378,11 @@ type EntityNetworkEdge {
   dst: String!
   weight: Int!
   kind: String!
+
+  """
+  Co-menções com conteúdo distinto: republicações (mesmo content_hash) contam uma vez. `weight` conta artigos. Null antes do cálculo do grafo.
+  """
+  uniqueContentWeight: Int
 }
 
 type EntityNetworkNode {
@@ -338,6 +390,16 @@ type EntityNetworkNode {
   canonicalName: String
   type: String
   wikidataId: String
+
+  """
+  Artigos que mencionam a entidade (entity_stats). Null sem estatística calculada.
+  """
+  articleCount: Int
+
+  """
+  Conteúdos distintos que mencionam a entidade: republicações (mesmo content_hash) contam uma vez (entity_stats). Null sem estatística calculada.
+  """
+  uniqueContentCount: Int
 }
 
 type EntityNode {
@@ -349,6 +411,16 @@ type EntityNode {
   wikidataUrl: String
   description: String
   agencyKey: String
+
+  """
+  Artigos que mencionam a entidade (entity_stats). Null sem estatística calculada.
+  """
+  articleCount: Int
+
+  """
+  Conteúdos distintos que mencionam a entidade: republicações (mesmo content_hash) contam uma vez (entity_stats). Null sem estatística calculada.
+  """
+  uniqueContentCount: Int
 }
 
 type EntitySearchResult {
@@ -724,14 +796,19 @@ type Query {
   entity(id: String!): EntityNode
 
   """
-  Entidades relacionadas a `id` (entity_id) por co-menção (Fase 6c). Lê a rede de co-menção materializada (`entity_edges`, 1-hop), retorna os vizinhos hidratados do entity_registry, ordenados por `weight` (nº de artigos em co-menção) desc, até `limit`. Retorna [] sem Postgres ou sem vizinhos. PÚBLICO.
+  Entidades relacionadas a `id` (entity_id) por co-menção (Fase 6c). Lê a rede de co-menção materializada (`entity_edges`, 1-hop), retorna os vizinhos hidratados do entity_registry com weight >= `minWeight` (default 1 = todos; 2 descarta co-menções únicas), ordenados por `orderBy` (default WEIGHT = nº de artigos em co-menção) desc, até `limit`. Retorna [] sem Postgres ou sem vizinhos. PÚBLICO.
   """
-  relatedEntities(id: String!, limit: Int! = 12): [RelatedEntity!]!
+  relatedEntities(id: String!, limit: Int! = 12, orderBy: RelatedEntityOrder! = WEIGHT, minWeight: Int! = 1): [RelatedEntity!]!
 
   """
-  Ego-network (nós + arestas) ao redor de `id` (entity_id) para a visualização de rede (Fase 6c). Travessia não-direcionada na rede de co-menção (`entity_edges`) via CTE recursiva até `depth` saltos (CLAMPado a no máx 2; profundidades maiores ficam para o Neo4j futuro). `limit` limita o nº de arestas (cap de tamanho do grafo). Retorna {nodes:[], edges:[]} sem Postgres. PÚBLICO.
+  Totais do grafo de entidades (entity_graph_meta): artigos e conteúdos distintos considerados e quando foram calculados. Null sem Postgres ou antes da primeira execução da DAG do grafo. PÚBLICO.
   """
-  entityNetwork(id: String!, depth: Int! = 1, limit: Int! = 50): EntityNetwork!
+  entityGraphStats: EntityGraphStats
+
+  """
+  Ego-network (nós + arestas) ao redor de `id` (entity_id) para a visualização de rede (Fase 6c). Modo legado (default): travessia não-direcionada na rede de co-menção (`entity_edges`) via CTE recursiva até `depth` saltos (CLAMPado a no máx 2; profundidades maiores ficam para o Neo4j futuro); `limit` limita o nº de arestas (cap de tamanho do grafo). `egoCentered: true`: a entidade + seus `maxNodes` (1–100) vizinhos mais fortes (weight >= 2), com TODAS as arestas da entidade; `limit` (1–500) corta só as arestas entre vizinhos (`includeNeighborEdges`); `depth` é ignorado. Retorna {nodes:[], edges:[]} sem Postgres. PÚBLICO.
+  """
+  entityNetwork(id: String!, depth: Int! = 1, limit: Int! = 50, egoCentered: Boolean! = false, maxNodes: Int! = 30, includeNeighborEdges: Boolean! = true): EntityNetwork!
 
   """
   Contagem de artigos por code de tema (nivel `level`) nos ultimos `days` dias. `label` e None (o portal mapeia pela config). PUBLICO.
@@ -748,7 +825,9 @@ type Query {
   """
   estimateRecorteCount(themes: [String!]!, agencies: [String!]!, keywords: [String!]!, sinceHours: Int! = 24): Int!
 
-  """Série temporal de cobertura de uma entidade por agência"""
+  """
+  Série temporal de cobertura de uma entidade por agência. `dateFrom`/`dateTo` (AAAA-MM-DD, opcionais) em dias UTC; dateFrom inclusivo, dateTo exclusivo: para incluir o dia D inteiro, passe dateTo = D + 1. `period` é o início do período em UTC ("AAAA-MM-DD 00:00:00+00").
+  """
   entityCoverage(entityId: String!, dateFrom: String = null, dateTo: String = null, granularity: Granularity! = MONTH): [EntityCoveragePoint!]!
 
   """Busca fuzzy de entidades por nome ou alias"""
@@ -793,6 +872,35 @@ type RelatedEntity {
   wikidataId: String
   weight: Int!
   kind: String!
+
+  """
+  Artigos que mencionam o vizinho (entity_stats). Null sem estatística calculada.
+  """
+  articleCount: Int
+
+  """
+  Conteúdos distintos que mencionam o vizinho: republicações (mesmo content_hash) contam uma vez (entity_stats). Null sem estatística calculada.
+  """
+  uniqueContentCount: Int
+
+  """
+  Co-menções com conteúdo distinto: republicações (mesmo content_hash) contam uma vez. `weight` conta artigos. Null antes do cálculo do grafo.
+  """
+  uniqueContentWeight: Int
+
+  """
+  weight · N / (artigos da entidade · artigos do vizinho), com N = entityGraphStats.totalArticles. > 1: co-menção acima do esperado ao acaso. Null quando falta estatística de uma das pontas ou o total do grafo.
+  """
+  lift: Float
+}
+
+"""
+Ordenação de `relatedEntities`. WEIGHT: artigos em co-menção (legado). UNIQUE_CONTENT: co-menções com conteúdo distinto (desconta republicações). LIFT: co-menção observada / esperada pela frequência das duas entidades (destaca associações específicas em vez de entidades genéricas). Valores nulos vão para o fim; desempate por weight.
+"""
+enum RelatedEntityOrder {
+  WEIGHT
+  UNIQUE_CONTENT
+  LIFT
 }
 
 type Release {

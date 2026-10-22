@@ -56,7 +56,17 @@ class ArticleFeatures:
     unique_sessions: Optional[int] = None
     trending_score: Optional[float] = None
     word_count: Optional[int] = None
-    readability_flesch: Optional[float] = None
+    readability_flesch: Optional[float] = strawberry.field(
+        default=None,
+        description="Índice de Flesch pela fórmula inglesa (legado; escala distorcida para português).",
+    )
+    readability_flesch_ptbr: Optional[float] = strawberry.field(
+        default=None,
+        description=(
+            "Índice de Flesch adaptado ao português (Martins et al., 1996): 0–100, maior = mais fácil. "
+            "Null até o artigo ser recalculado."
+        ),
+    )
 
 
 def _as_int(value: Any) -> Optional[int]:
@@ -163,4 +173,5 @@ def article_features_from_json(
         trending_score=_as_float(features.get("trending_score")),
         word_count=_as_int(features.get("word_count")),
         readability_flesch=_as_float(features.get("readability_flesch")),
+        readability_flesch_ptbr=_as_float(features.get("readability_flesch_ptbr")),
     )

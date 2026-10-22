@@ -18,6 +18,7 @@ Convencoes do repo: IDs scalar = String; resolvers podem ser sync; mock de
 datasource nos testes.
 """
 
+import enum
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -82,6 +83,31 @@ class EntityNode:
     wikidata_url: Optional[str] = None
     description: Optional[str] = None
     agency_key: Optional[str] = None
+    article_count: Optional[int] = strawberry.field(
+        default=None,
+        description="Artigos que mencionam a entidade (entity_stats). Null sem estatística calculada.",
+    )
+    unique_content_count: Optional[int] = strawberry.field(
+        default=None,
+        description=(
+            "Conteúdos distintos que mencionam a entidade: republicações (mesmo content_hash) contam "
+            "uma vez (entity_stats). Null sem estatística calculada."
+        ),
+    )
+
+
+@strawberry.enum(
+    description=(
+        "Ordenação de `relatedEntities`. WEIGHT: artigos em co-menção (legado). UNIQUE_CONTENT: "
+        "co-menções com conteúdo distinto (desconta republicações). LIFT: co-menção observada / "
+        "esperada pela frequência das duas entidades (destaca associações específicas em vez de "
+        "entidades genéricas). Valores nulos vão para o fim; desempate por weight."
+    )
+)
+class RelatedEntityOrder(enum.Enum):
+    WEIGHT = "weight"
+    UNIQUE_CONTENT = "unique_content"
+    LIFT = "lift"
 
 
 @strawberry.type
@@ -98,6 +124,44 @@ class RelatedEntity:
     wikidata_id: Optional[str] = None
     weight: int = 0
     kind: str = "co_mention"
+    article_count: Optional[int] = strawberry.field(
+        default=None,
+        description="Artigos que mencionam o vizinho (entity_stats). Null sem estatística calculada.",
+    )
+    unique_content_count: Optional[int] = strawberry.field(
+        default=None,
+        description=(
+            "Conteúdos distintos que mencionam o vizinho: republicações (mesmo content_hash) contam "
+            "uma vez (entity_stats). Null sem estatística calculada."
+        ),
+    )
+    unique_content_weight: Optional[int] = strawberry.field(
+        default=None,
+        description=(
+            "Co-menções com conteúdo distinto: republicações (mesmo content_hash) contam uma vez. "
+            "`weight` conta artigos. Null antes do cálculo do grafo."
+        ),
+    )
+    lift: Optional[float] = strawberry.field(
+        default=None,
+        description=(
+            "weight · N / (artigos da entidade · artigos do vizinho), com N = "
+            "entityGraphStats.totalArticles. > 1: co-menção acima do esperado ao acaso. Null quando "
+            "falta estatística de uma das pontas ou o total do grafo."
+        ),
+    )
+
+
+@strawberry.type(
+    description=(
+        "Totais do grafo de entidades (entity_graph_meta), recalculados pela DAG do grafo; "
+        "N do lift de `relatedEntities`."
+    )
+)
+class EntityGraphStats:
+    total_articles: int
+    total_unique_content: int
+    computed_at: Optional[datetime] = None
 
 
 @strawberry.type
@@ -108,6 +172,17 @@ class EntityNetworkNode:
     canonical_name: Optional[str] = None
     type: Optional[str] = None
     wikidata_id: Optional[str] = None
+    article_count: Optional[int] = strawberry.field(
+        default=None,
+        description="Artigos que mencionam a entidade (entity_stats). Null sem estatística calculada.",
+    )
+    unique_content_count: Optional[int] = strawberry.field(
+        default=None,
+        description=(
+            "Conteúdos distintos que mencionam a entidade: republicações (mesmo content_hash) contam "
+            "uma vez (entity_stats). Null sem estatística calculada."
+        ),
+    )
 
 
 @strawberry.type
@@ -118,6 +193,13 @@ class EntityNetworkEdge:
     dst: str
     weight: int = 0
     kind: str = "co_mention"
+    unique_content_weight: Optional[int] = strawberry.field(
+        default=None,
+        description=(
+            "Co-menções com conteúdo distinto: republicações (mesmo content_hash) contam uma vez. "
+            "`weight` conta artigos. Null antes do cálculo do grafo."
+        ),
+    )
 
 
 @strawberry.type
@@ -281,15 +363,18 @@ class PublicContentQuery:
             wikidata_url=rec.wikidata_url,
             description=rec.description,
             agency_key=rec.agency_key,
+            article_count=rec.article_count,
+            unique_content_count=rec.unique_content_count,
         )
 
     @strawberry.field(
         description=(
             "Entidades relacionadas a `id` (entity_id) por co-menção (Fase 6c). "
             "Lê a rede de co-menção materializada (`entity_edges`, 1-hop), "
-            "retorna os vizinhos hidratados do entity_registry, ordenados por "
-            "`weight` (nº de artigos em co-menção) desc, até `limit`. Retorna [] "
-            "sem Postgres ou sem vizinhos. PÚBLICO."
+            "retorna os vizinhos hidratados do entity_registry com weight >= "
+            "`minWeight` (default 1 = todos; 2 descarta co-menções únicas), "
+            "ordenados por `orderBy` (default WEIGHT = nº de artigos em co-menção) "
+            "desc, até `limit`. Retorna [] sem Postgres ou sem vizinhos. PÚBLICO."
         )
     )
     async def related_entities(
@@ -297,12 +382,16 @@ class PublicContentQuery:
         info: Info,
         id: str,
         limit: int = 12,
+        order_by: RelatedEntityOrder = RelatedEntityOrder.WEIGHT,
+        min_weight: int = 1,
     ) -> list[RelatedEntity]:
         ctx = info.context
         pg = ctx.postgres_ds
         if pg is None:
             return []
-        records = await pg.get_related_entities(id, limit=limit)
+        records = await pg.get_related_entities(
+            id, limit=limit, order_by=order_by.value, min_weight=min_weight
+        )
         return [
             RelatedEntity(
                 canonical_id=rec.entity_id,
@@ -311,18 +400,46 @@ class PublicContentQuery:
                 wikidata_id=rec.wikidata_id,
                 weight=rec.weight,
                 kind=rec.kind,
+                article_count=rec.article_count,
+                unique_content_count=rec.unique_content_count,
+                unique_content_weight=rec.unique_content_weight,
+                lift=rec.lift,
             )
             for rec in records
         ]
 
     @strawberry.field(
         description=(
+            "Totais do grafo de entidades (entity_graph_meta): artigos e conteúdos "
+            "distintos considerados e quando foram calculados. Null sem Postgres ou "
+            "antes da primeira execução da DAG do grafo. PÚBLICO."
+        )
+    )
+    async def entity_graph_stats(self, info: Info) -> Optional[EntityGraphStats]:
+        pg = info.context.postgres_ds
+        if pg is None:
+            return None
+        rec = await pg.get_entity_graph_stats()
+        if rec is None:
+            return None
+        return EntityGraphStats(
+            total_articles=rec.total_articles,
+            total_unique_content=rec.total_unique_content,
+            computed_at=rec.computed_at,
+        )
+
+    @strawberry.field(
+        description=(
             "Ego-network (nós + arestas) ao redor de `id` (entity_id) para a "
-            "visualização de rede (Fase 6c). Travessia não-direcionada na rede "
-            "de co-menção (`entity_edges`) via CTE recursiva até `depth` saltos "
-            "(CLAMPado a no máx 2; profundidades maiores ficam para o Neo4j "
-            "futuro). `limit` limita o nº de arestas (cap de tamanho do grafo). "
-            "Retorna {nodes:[], edges:[]} sem Postgres. PÚBLICO."
+            "visualização de rede (Fase 6c). Modo legado (default): travessia "
+            "não-direcionada na rede de co-menção (`entity_edges`) via CTE "
+            "recursiva até `depth` saltos (CLAMPado a no máx 2; profundidades "
+            "maiores ficam para o Neo4j futuro); `limit` limita o nº de arestas "
+            "(cap de tamanho do grafo). `egoCentered: true`: a entidade + seus "
+            "`maxNodes` (1–100) vizinhos mais fortes (weight >= 2), com TODAS as "
+            "arestas da entidade; `limit` (1–500) corta só as arestas entre "
+            "vizinhos (`includeNeighborEdges`); `depth` é ignorado. Retorna "
+            "{nodes:[], edges:[]} sem Postgres. PÚBLICO."
         )
     )
     async def entity_network(
@@ -331,12 +448,22 @@ class PublicContentQuery:
         id: str,
         depth: int = 1,
         limit: int = 50,
+        ego_centered: bool = False,
+        max_nodes: int = 30,
+        include_neighbor_edges: bool = True,
     ) -> EntityNetwork:
         ctx = info.context
         pg = ctx.postgres_ds
         if pg is None:
             return EntityNetwork(nodes=[], edges=[])
-        net = await pg.get_entity_network(id, depth=depth, limit=limit)
+        net = await pg.get_entity_network(
+            id,
+            depth=depth,
+            limit=limit,
+            ego_centered=ego_centered,
+            max_nodes=max_nodes,
+            include_neighbor_edges=include_neighbor_edges,
+        )
         return EntityNetwork(
             nodes=[
                 EntityNetworkNode(
@@ -344,6 +471,8 @@ class PublicContentQuery:
                     canonical_name=n.canonical_name,
                     type=n.type,
                     wikidata_id=n.wikidata_id,
+                    article_count=n.article_count,
+                    unique_content_count=n.unique_content_count,
                 )
                 for n in net.nodes
             ],
@@ -353,6 +482,7 @@ class PublicContentQuery:
                     dst=e.dst,
                     weight=e.weight,
                     kind=e.kind,
+                    unique_content_weight=e.unique_content_weight,
                 )
                 for e in net.edges
             ],

@@ -65,18 +65,35 @@ class AgencyPeriodMetrics:
     pct_negative: Optional[float] = strawberry.field(
         description="Fração (0 a 1) dos artigos COM rótulo de sentimento que são negativos. Null se nenhum tem.",
     )
-    avg_readability_flesch: Optional[float]
+    avg_readability_flesch: Optional[float] = strawberry.field(
+        description="Média do Flesch pela fórmula inglesa (legado; escala distorcida para português).",
+    )
     avg_word_count: Optional[float]
     top_themes: list[ThemeStats]
+    avg_readability_flesch_ptbr: Optional[float] = strawberry.field(
+        default=None,
+        description=(
+            "Média do Flesch adaptado ao português (Martins et al., 1996) dos artigos que o têm. "
+            "Null quando nenhum tem."
+        ),
+    )
+    readability_flesch_ptbr_count: Optional[int] = strawberry.field(
+        default=None,
+        description="Nº de artigos do grupo com Flesch pt-BR calculado (base de avgReadabilityFleschPtbr).",
+    )
 
 
 @strawberry.type
 class ArticleSummary:
     unique_id: str
     title: str
-    agency_name: Optional[str]
+    agency_name: Optional[str] = strawberry.field(
+        description="Key da agência (o mesmo valor de agencyKey, apesar do nome). Mantido por compatibilidade.",
+    )
     published_at: Optional[str]
     trending_score: Optional[float]
+    url: Optional[str] = strawberry.field(default=None, description="Link do artigo no portal de origem.")
+    agency_key: Optional[str] = strawberry.field(default=None, description="Key da agência (ex.: 'saude').")
 
 
 @strawberry.type
