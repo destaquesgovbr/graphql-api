@@ -154,3 +154,14 @@ class TestEntityCoverageSDL:
         sdl = test_schema.as_str()
         block = sdl.split("type EntityCoveragePoint {", 1)[1].split("}", 1)[0]
         assert "uniqueContentCount: Int!" in block
+
+    def test_unique_content_count_documenta_chave_de_quase_duplicata(self):
+        # A chave deixou de ser só o hash exato: a descrição precisa dizer que
+        # quase-duplicatas (news.content_key) contam como o mesmo conteúdo.
+        field = next(
+            f
+            for f in test_schema.get_type_by_name("EntityCoveragePoint").fields
+            if f.python_name == "unique_content_count"
+        )
+        assert "content_key" in field.description
+        assert "quase-duplicatas" in field.description

@@ -571,25 +571,34 @@ class TestEntityCoverageDatas:
 
 
 class TestEntityCoverageConteudoUnico:
-    """uniqueContentCount: cada conteúdo (COALESCE(content_hash, unique_id)) é
-    creditado só à PRIMEIRA agência que o publicou no intervalo — o campo soma
-    entre agências e períodos sem contar republicações duas vezes."""
+    """uniqueContentCount: cada conteúdo (COALESCE(content_key, content_hash,
+    unique_id)) é creditado só à PRIMEIRA agência que o publicou no intervalo —
+    o campo soma entre agências e períodos sem contar republicações duas vezes."""
 
     def test_sql_credita_a_primeira_publicacao(self):
         sql = _flat(_ENTITY_COVERAGE_SQL)
-        assert "PARTITION BY COALESCE(n.content_hash, ne.unique_id)" in sql
+        assert "PARTITION BY COALESCE(n.content_key, n.content_hash, ne.unique_id)" in sql
         assert "ORDER BY n.published_at, ne.unique_id" in sql
         # Uma linha por artigo (PK de news_entities + joins 1:1): COUNT(*) é exato.
         assert "COUNT(*) FILTER (WHERE m.is_first) AS unique_content_count" in sql
 
     def test_chave_de_dedup_isolada_numa_constante(self):
-        # A chave exata por content_hash quase não pega republicações entre
-        # órgãos (raramente idênticas byte a byte); trocar por uma chave de
-        # quase-duplicata deve mexer só nesta constante, sem mudar a API.
-        assert _CONTENT_DEDUP_KEY_SQL == "COALESCE(n.content_hash, ne.unique_id)"
+        # A chave de quase-duplicata (news.content_key, migração 035 do
+        # data-platform) mora só nesta constante; a API (`uniqueContentCount`)
+        # não muda. Mesma definição do `ARTICLE_CONTENT_KEY_SQL` do data-platform.
+        assert _CONTENT_DEDUP_KEY_SQL == "COALESCE(n.content_key, n.content_hash, ne.unique_id)"
         sql = _flat(_ENTITY_COVERAGE_SQL)
         assert f"PARTITION BY {_CONTENT_DEDUP_KEY_SQL}" in sql
+        assert sql.count("content_key") == 1
         assert sql.count("content_hash") == 1
+
+    def test_chave_de_quase_duplicata_tem_precedencia(self):
+        # content_key (grupo de quase-duplicatas) primeiro; o hash exato só vale
+        # para linhas ainda sem chave (antes do backfill ou fora da janela do
+        # cálculo); o unique_id garante chave não nula. Os espaços não colidem:
+        # content_key é o unique_id do líder do grupo, content_hash tem 16 hex.
+        args = _CONTENT_DEDUP_KEY_SQL.removeprefix("COALESCE(").removesuffix(")").split(", ")
+        assert args == ["n.content_key", "n.content_hash", "ne.unique_id"]
 
     def test_sql_preserva_agregados_existentes(self):
         sql = _flat(_ENTITY_COVERAGE_SQL)
