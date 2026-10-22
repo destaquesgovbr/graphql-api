@@ -31,9 +31,9 @@ class EntityCoveragePoint:
         description=(
             "Conteúdos distintos creditados a esta agência: cada conteúdo conta só para a primeira "
             "agência que o publicou no intervalo consultado, então o campo soma entre agências e "
-            "períodos sem contar republicações. Republicações quase-duplicatas (mesma chave "
-            "news.content_key; sem ela, o mesmo content_hash) são o mesmo conteúdo. articleCount "
-            "conta artigos."
+            "períodos sem contar republicações. Republicações quase-duplicatas (mesma chave de "
+            "conteúdo: news.content_key; sem ela, o hash exato do conteúdo; ver Article.contentKey) "
+            "são o mesmo conteúdo. articleCount conta artigos."
         ),
     )
 

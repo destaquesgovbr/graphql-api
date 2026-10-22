@@ -90,8 +90,8 @@ class EntityNode:
     unique_content_count: Optional[int] = strawberry.field(
         default=None,
         description=(
-            "Conteúdos distintos que mencionam a entidade: republicações (mesmo content_hash) contam "
-            "uma vez (entity_stats). Null sem estatística calculada."
+            "Conteúdos distintos que mencionam a entidade: republicações (mesma chave de conteúdo, "
+            "ver Article.contentKey) contam uma vez (entity_stats). Null sem estatística calculada."
         ),
     )
 
@@ -131,15 +131,15 @@ class RelatedEntity:
     unique_content_count: Optional[int] = strawberry.field(
         default=None,
         description=(
-            "Conteúdos distintos que mencionam o vizinho: republicações (mesmo content_hash) contam "
-            "uma vez (entity_stats). Null sem estatística calculada."
+            "Conteúdos distintos que mencionam o vizinho: republicações (mesma chave de conteúdo, "
+            "ver Article.contentKey) contam uma vez (entity_stats). Null sem estatística calculada."
         ),
     )
     unique_content_weight: Optional[int] = strawberry.field(
         default=None,
         description=(
-            "Co-menções com conteúdo distinto: republicações (mesmo content_hash) contam uma vez. "
-            "`weight` conta artigos. Null antes do cálculo do grafo."
+            "Co-menções com conteúdo distinto: republicações (mesma chave de conteúdo, ver "
+            "Article.contentKey) contam uma vez. `weight` conta artigos. Null antes do cálculo do grafo."
         ),
     )
     lift: Optional[float] = strawberry.field(
@@ -179,8 +179,8 @@ class EntityNetworkNode:
     unique_content_count: Optional[int] = strawberry.field(
         default=None,
         description=(
-            "Conteúdos distintos que mencionam a entidade: republicações (mesmo content_hash) contam "
-            "uma vez (entity_stats). Null sem estatística calculada."
+            "Conteúdos distintos que mencionam a entidade: republicações (mesma chave de conteúdo, "
+            "ver Article.contentKey) contam uma vez (entity_stats). Null sem estatística calculada."
         ),
     )
 
@@ -196,8 +196,8 @@ class EntityNetworkEdge:
     unique_content_weight: Optional[int] = strawberry.field(
         default=None,
         description=(
-            "Co-menções com conteúdo distinto: republicações (mesmo content_hash) contam uma vez. "
-            "`weight` conta artigos. Null antes do cálculo do grafo."
+            "Co-menções com conteúdo distinto: republicações (mesma chave de conteúdo, ver "
+            "Article.contentKey) contam uma vez. `weight` conta artigos. Null antes do cálculo do grafo."
         ),
     )
 

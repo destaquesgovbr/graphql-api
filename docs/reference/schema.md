@@ -343,7 +343,7 @@ type EntityCoveragePoint {
   avgSentimentScore: Float
 
   """
-  Conteúdos distintos creditados a esta agência: cada conteúdo conta só para a primeira agência que o publicou no intervalo consultado, então o campo soma entre agências e períodos sem contar republicações. Republicações quase-duplicatas (mesma chave news.content_key; sem ela, o mesmo content_hash) são o mesmo conteúdo. articleCount conta artigos.
+  Conteúdos distintos creditados a esta agência: cada conteúdo conta só para a primeira agência que o publicou no intervalo consultado, então o campo soma entre agências e períodos sem contar republicações. Republicações quase-duplicatas (mesma chave de conteúdo: news.content_key; sem ela, o hash exato do conteúdo; ver Article.contentKey) são o mesmo conteúdo. articleCount conta artigos.
   """
   uniqueContentCount: Int!
 }
@@ -385,7 +385,7 @@ type EntityNetworkEdge {
   kind: String!
 
   """
-  Co-menções com conteúdo distinto: republicações (mesmo content_hash) contam uma vez. `weight` conta artigos. Null antes do cálculo do grafo.
+  Co-menções com conteúdo distinto: republicações (mesma chave de conteúdo, ver Article.contentKey) contam uma vez. `weight` conta artigos. Null antes do cálculo do grafo.
   """
   uniqueContentWeight: Int
 }
@@ -402,7 +402,7 @@ type EntityNetworkNode {
   articleCount: Int
 
   """
-  Conteúdos distintos que mencionam a entidade: republicações (mesmo content_hash) contam uma vez (entity_stats). Null sem estatística calculada.
+  Conteúdos distintos que mencionam a entidade: republicações (mesma chave de conteúdo, ver Article.contentKey) contam uma vez (entity_stats). Null sem estatística calculada.
   """
   uniqueContentCount: Int
 }
@@ -423,7 +423,7 @@ type EntityNode {
   articleCount: Int
 
   """
-  Conteúdos distintos que mencionam a entidade: republicações (mesmo content_hash) contam uma vez (entity_stats). Null sem estatística calculada.
+  Conteúdos distintos que mencionam a entidade: republicações (mesma chave de conteúdo, ver Article.contentKey) contam uma vez (entity_stats). Null sem estatística calculada.
   """
   uniqueContentCount: Int
 }
@@ -884,12 +884,12 @@ type RelatedEntity {
   articleCount: Int
 
   """
-  Conteúdos distintos que mencionam o vizinho: republicações (mesmo content_hash) contam uma vez (entity_stats). Null sem estatística calculada.
+  Conteúdos distintos que mencionam o vizinho: republicações (mesma chave de conteúdo, ver Article.contentKey) contam uma vez (entity_stats). Null sem estatística calculada.
   """
   uniqueContentCount: Int
 
   """
-  Co-menções com conteúdo distinto: republicações (mesmo content_hash) contam uma vez. `weight` conta artigos. Null antes do cálculo do grafo.
+  Co-menções com conteúdo distinto: republicações (mesma chave de conteúdo, ver Article.contentKey) contam uma vez. `weight` conta artigos. Null antes do cálculo do grafo.
   """
   uniqueContentWeight: Int
 
