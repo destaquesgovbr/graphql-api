@@ -1,9 +1,11 @@
+import re
 from unittest.mock import AsyncMock
 
 import pytest
 import strawberry
 
 from graphql_api.context import GraphQLContext
+from graphql_api.datasources.postgres import NewsRecord
 from graphql_api.schema.resolvers.entities import EntityQuery
 from graphql_api.schema.resolvers.health import HealthQuery
 
@@ -154,3 +156,48 @@ class TestEntityCoverageSDL:
         sdl = test_schema.as_str()
         block = sdl.split("type EntityCoveragePoint {", 1)[1].split("}", 1)[0]
         assert "uniqueContentCount: Int!" in block
+
+    def test_unique_content_count_documenta_chave_de_quase_duplicata(self):
+        # A chave deixou de ser só o hash exato: a descrição precisa dizer que
+        # quase-duplicatas (news.content_key) contam como o mesmo conteúdo.
+        field = next(
+            f
+            for f in test_schema.get_type_by_name("EntityCoveragePoint").fields
+            if f.python_name == "unique_content_count"
+        )
+        assert "content_key" in field.description
+        assert "quase-duplicatas" in field.description
+
+
+class TestEntityArticlesContentKey:
+    """`Article.contentKey` no entityArticles (Postgres): a mesma chave do
+    uniqueContentCount, para o cliente agrupar republicações."""
+
+    @pytest.mark.asyncio
+    async def test_entity_articles_expoe_content_key(self):
+        mock_pg = AsyncMock()
+        mock_pg.get_entity_articles = AsyncMock(
+            return_value=(
+                [
+                    NewsRecord(unique_id="b", title="B", url="https://b", agency_key="ebc", content_key="a"),
+                    NewsRecord(unique_id="a", title="A", url="https://a", agency_key="mec", content_key="a"),
+                    NewsRecord(unique_id="c", title="C", url="https://c", agency_key="mec", content_key="c"),
+                ],
+                3,
+            )
+        )
+        query = '{ entityArticles(entityId: "Q1") { found articles { uniqueId agency contentKey } } }'
+        result = await test_schema.execute(query, context_value=_make_ctx(postgres_ds=mock_pg))
+        assert result.errors is None
+        arts = result.data["entityArticles"]["articles"]
+        assert [(a["uniqueId"], a["contentKey"]) for a in arts] == [("b", "a"), ("a", "a"), ("c", "c")]
+
+    def test_content_key_no_sdl_nulavel_e_documentado(self):
+        art = test_schema.get_type_by_name("Article")
+        field = next(f for f in art.fields if f.python_name == "content_key")
+        # Nulável: null nos caminhos do Typesense.
+        assert re.search(r"^\s*contentKey: String$", test_schema.as_str(), re.M)
+        # Só os caminhos servidos pelo Postgres preenchem; o Typesense ainda não
+        # indexa a chave.
+        assert "entityArticles" in field.description
+        assert "Typesense" in field.description

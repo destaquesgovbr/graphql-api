@@ -27,6 +27,70 @@ são instanciados no `lifespan` (startup) a partir de env vars e injetados no
     `uniqueContentCount`, `uniqueContentWeight`, `lift`) ficam nulos e
     `entityGraphStats` é `null`.
 
+!!! warning "`entityCoverage` e a migração 035 do data-platform"
+    O dedup de republicações do `entityCoverage` (`uniqueContentCount`) usa a
+    coluna `news.content_key`, criada pela migração 035 do data-platform. A
+    ordem certa é aplicar a 035 **antes** de colocar esta versão no ar, mas a
+    API não quebra se a ordem for outra: o `PostgresDatasource` sonda a coluna
+    no catálogo (no máximo a cada 5 minutos por instância) e, sem ela, usa a
+    chave por hash exato, `COALESCE(n.content_hash, ne.unique_id)`. A 035
+    aplicada com o serviço no ar entra em uso em até 5 minutos, sem novo
+    deploy. Se a coluna sumir com a sonda ainda positiva (rollback da 035), o
+    erro `42703` (`column n.content_key does not exist`) é pego e a query é
+    refeita pela chave por hash. Com a 035 aplicada mas antes do backfill da
+    chave, o resultado é o mesmo de antes (cai no `content_hash`).
+
+## Chave de conteúdo (dedup de republicações)
+
+Um mesmo conteúdo publicado por vários órgãos (republicação) deve contar uma
+vez nas contagens de "conteúdo único". A chave fica numa constante só,
+`_CONTENT_DEDUP_KEY_SQL` em `datasources/postgres.py`:
+
+```sql
+COALESCE(n.content_key, n.content_hash, ne.unique_id)
+```
+
+- **`news.content_key`** (migração 035 do data-platform): agrupa
+  quase-duplicatas. É o `unique_id` do artigo-líder do grupo (o mais antigo),
+  calculado em lote pela tarefa `compute_content_keys` da DAG do grafo, que
+  roda a cada 6 horas e recalcula os últimos 10 dias a cada execução.
+- **`content_hash`**: hash exato do conteúdo, para linhas ainda sem chave
+  (antes do backfill ou recém-ingeridas, até a próxima execução da DAG).
+  Sozinho quase não pega republicações entre órgãos, porque cada órgão
+  reescreve as URLs de imagem e de link.
+- **`unique_id`**: garante uma chave não nula.
+
+!!! important "Contrato com o data-platform: mesmo hash, mesma chave"
+    Depois do backfill quase toda linha tem `content_key`, e o `content_hash`
+    deixa de ser consultado. Para o `uniqueContentCount` nunca ficar **maior**
+    que o do dedup por hash exato, cada grupo de `content_hash` precisa caber
+    inteiro num grupo de `content_key`. Quem garante isso é o
+    `compute_content_keys` (DP-1b): ele une primeiro por `content_hash`,
+    herdando a chave do líder do hash sem janela de tempo nem guardas (inclusive
+    de artigos fora da janela de recálculo de 10 dias), e só depois aplica a
+    regra de quase-duplicata (H5). Sem esse passo, pares com o mesmo hash fora
+    das regras do H5 (conteúdo com menos de 30 palavras, Δt maior que 7 dias,
+    título na lista de exclusão) virariam líderes distintos e contariam duas
+    vezes. Em 21/10 havia 407 grupos de `content_hash` repetido (829 artigos);
+    129 deles se estendem por mais de 7 dias.
+
+    Resta uma janela transitória: um artigo recém-ingerido ainda sem chave cai
+    no `content_hash`, e o seu gêmeo de hash, já com chave, fica com o
+    `unique_id` do líder. Os dois contam à parte até a próxima execução da DAG
+    (até 6 horas).
+
+Os espaços de chave não colidem (`unique_id` do líder contra hash de 16 hex).
+A DAG do grafo do data-platform usa a mesma definição
+(`ARTICLE_CONTENT_KEY_SQL`) para `entity_stats.unique_content_count` e
+`entity_edges.unique_content_count`: mude as duas pontas juntas.
+
+A mesma chave sai na API como **`Article.contentKey`**, calculada em Python
+(`_content_dedup_key`, mesma precedência) a partir do `n.*` lido do Postgres,
+por isso não exige a coluna. Só os caminhos servidos pelo Postgres a preenchem
+(hoje, `entityArticles`); nas listas e na busca servidas pelo Typesense o campo
+é `null`, porque o índice ainda não tem a chave (o `dedup: true` do Typesense
+continua agrupando por `content_hash`, ver abaixo).
+
 ## Injeção por request
 
 `get_context(request)` lê os datasources de `request.app.state` (populados pelo
@@ -69,7 +133,9 @@ capacidades, todas em cima da coleção `articles`:
 - **Dedup / `group_by content_hash`.** Quando o resolver pede `dedup` (em
   `articles`/`search` via `ArticleFilter.dedup` ou o arg `dedup` da `search`), a
   query usa `group_by=content_hash` + `group_limit=1`, colapsando variações do
-  mesmo conteúdo (republicações entre órgãos) numa única linha.
+  mesmo conteúdo numa única linha. É o hash exato: republicações entre órgãos
+  com URLs reescritas não se juntam. Trocar o `group_by` pela chave de conteúdo
+  (`content_key`) exige indexá-la no Typesense antes (pendente).
 - **Busca híbrida com `alpha` passthrough.** O arg `alpha` da `search` é repassado
   ao `vector_query` (`embedding:([], alpha: <alpha>)`), controlando o peso do
   vetor no ranking híbrido (default `0.3`; `0` = keyword puro, `1` = vetor puro).

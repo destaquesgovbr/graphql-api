@@ -199,3 +199,14 @@ def test_schema_md_embrulha_o_sdl_commitado():
     assert committed_md == _load_export_script().render_markdown(committed_sdl), (
         "docs/reference/schema.md não corresponde a schema.graphql. Rode `make docs-schema`."
     )
+
+
+def test_contagens_de_conteudo_unico_nao_prometem_hash_exato():
+    # Depois do DP-1b/GQL-1b, entity_stats/entity_edges e o entityCoverage contam
+    # conteúdo pela chave de quase-duplicata (news.content_key), não só pelo
+    # hash exato: as descrições não podem prometer "mesmo content_hash".
+    from graphql_api.schema import schema
+
+    sdl = schema.as_str()
+    assert "mesmo content_hash" not in sdl
+    assert sdl.count("mesma chave de conteúdo") >= 5
