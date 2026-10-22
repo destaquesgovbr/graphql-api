@@ -2,6 +2,7 @@ import json
 import logging
 import math
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Optional
@@ -605,18 +606,49 @@ ORDER BY d.day
 # Chave de "mesmo conteúdo" para o dedup de republicações no entityCoverage
 # (`n` = news, `ne` = news_entities). `news.content_key` (migração 035 do
 # data-platform) agrupa quase-duplicatas: é o `unique_id` do artigo-líder do
-# grupo, calculado em lote pela tarefa `compute_content_keys` da DAG do grafo.
-# O hash exato (`content_hash`) só vale para linhas ainda sem chave (antes do
-# backfill ou recém-ingeridas); ele quase não pega republicações entre órgãos,
-# porque cada órgão reescreve as URLs de imagem e de link. Os espaços de chave
-# não colidem (unique_id do líder contra hash de 16 hex).
-# EXIGE a coluna `news.content_key`: sem a migração 035 aplicada, o
-# entityCoverage falha com "column n.content_key does not exist".
+# grupo, calculado em lote pela tarefa `compute_content_keys` da DAG do grafo
+# (a cada 6h, recalculando os últimos 10 dias). O hash exato (`content_hash`)
+# quase não pega republicações entre órgãos, porque cada órgão reescreve as URLs
+# de imagem e de link. Os espaços de chave não colidem (unique_id do líder
+# contra hash de 16 hex).
+# CONTRATO com o DP-1b: cada grupo de `content_hash` cabe inteiro num grupo de
+# `content_key` (mesmo hash ⇒ mesma chave). O `compute_content_keys` une primeiro por
+# `content_hash`, herdando a chave do líder do hash sem janela de tempo nem
+# guardas (conteúdo curto, título excluído) — inclusive de artigos fora da
+# janela de recálculo de 10 dias —, e só depois aplica o H5. Depois do
+# backfill quase toda linha tem chave e o hash deixa de ser consultado; sem esse
+# contrato, pares com o mesmo hash fora das regras do H5 (Δt > 7 dias, conteúdo
+# curto) virariam líderes distintos e o uniqueContentCount SUBIRIA em relação ao
+# dedup por hash. O hash só vale para linhas ainda sem chave: antes do backfill
+# ou recém-ingeridas até a próxima execução da DAG (até 6h; nesse intervalo, um
+# artigo novo cujo gêmeo de hash já tem chave conta à parte).
+# A coluna pode não existir (deploy antes da 035, ou rollback dela): o
+# `entity_coverage` sonda a coluna (`_NEWS_HAS_CONTENT_KEY_SQL`, cache de
+# `_CONTENT_KEY_PROBE_TTL_S`) e, sem ela, usa `_CONTENT_DEDUP_KEY_SQL_SEM_CONTENT_KEY`.
 # Trocar a expressão aqui não muda a API (`uniqueContentCount`), mas
 # `entity_stats.unique_content_count` e `entity_edges.unique_content_count` vêm
 # da DAG do grafo no data-platform (`ARTICLE_CONTENT_KEY_SQL`) com a mesma
 # definição — mantenha as duas pontas alinhadas.
 _CONTENT_DEDUP_KEY_SQL = "COALESCE(n.content_key, n.content_hash, ne.unique_id)"
+# A chave enquanto `news.content_key` não existe: só o hash exato.
+_CONTENT_DEDUP_KEY_SQL_SEM_CONTENT_KEY = "COALESCE(n.content_hash, ne.unique_id)"
+
+# Sonda da coluna `news.content_key` no catálogo. `to_regclass('news')` resolve
+# a tabela pelo search_path, como as queries; devolve false (e não erro) se a
+# coluna ou a tabela não existirem.
+_NEWS_HAS_CONTENT_KEY_SQL = """
+SELECT EXISTS (
+    SELECT 1 FROM pg_attribute
+    WHERE attrelid = to_regclass('news')
+      AND attname = 'content_key'
+      AND NOT attisdropped
+)
+"""
+# Validade do resultado da sonda: a 035 aplicada com o serviço no ar entra em
+# uso em até 5 minutos, sem novo deploy.
+_CONTENT_KEY_PROBE_TTL_S = 300
+# SQLSTATE undefined_column (42703): coluna sumiu com o cache dizendo que existe.
+_UNDEFINED_COLUMN_SQLSTATE = "42703"
 
 
 def _content_dedup_key(row: dict) -> str:
@@ -647,7 +679,7 @@ def _content_dedup_key(row: dict) -> str:
 # com news/news_features, então COUNT(*) = COUNT(DISTINCT unique_id) — e, sem
 # DISTINCT, o agregado pode ser por hash (o sort após a janela era o gargalo).
 # Score de sentimento aninhado com fallback plano (ver `_AGENCY_ANALYTICS_SQL`).
-_ENTITY_COVERAGE_SQL = f"""
+_ENTITY_COVERAGE_SQL_TEMPLATE = """
 WITH mentions AS (
     SELECT
         to_char(DATE_TRUNC($1, ne.published_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD HH24:MI:SS"+00"') AS period,
@@ -656,7 +688,7 @@ WITH mentions AS (
         n.agency_name,
         COALESCE(nf.features->'sentiment'->>'score', nf.features->>'sentiment_score')::float AS sentiment_score,
         ROW_NUMBER() OVER (
-            PARTITION BY {_CONTENT_DEDUP_KEY_SQL}
+            PARTITION BY {dedup_key}
             ORDER BY n.published_at, ne.unique_id
         ) = 1 AS is_first
     FROM news_entities ne
@@ -678,6 +710,11 @@ FROM mentions m
 GROUP BY period, m.agency_key, m.agency_name
 ORDER BY period
 """
+_ENTITY_COVERAGE_SQL = _ENTITY_COVERAGE_SQL_TEMPLATE.format(dedup_key=_CONTENT_DEDUP_KEY_SQL)
+# O mesmo SQL enquanto `news.content_key` não existe (ver `entity_coverage`).
+_ENTITY_COVERAGE_SQL_SEM_CONTENT_KEY = _ENTITY_COVERAGE_SQL_TEMPLATE.format(
+    dedup_key=_CONTENT_DEDUP_KEY_SQL_SEM_CONTENT_KEY
+)
 
 # Busca de entidades por nome ou alias: UNION entre match exato por alias
 # normalizado (unaccent + lower) e match fuzzy por trigrama (pg_trgm %).
@@ -1095,8 +1132,11 @@ def _row_to_typesense_doc(row: dict) -> TypesenseDocRecord:
 
 
 class PostgresDatasource:
-    def __init__(self, pool):
+    def __init__(self, pool, *, clock=time.monotonic):
         self._pool = pool
+        self._clock = clock
+        # Cache da sonda de `news.content_key`: (existe?, instante da sonda).
+        self._content_key_probe: tuple[bool, float] | None = None
 
     @classmethod
     async def from_env(
@@ -1455,16 +1495,48 @@ class PostgresDatasource:
         Retorna lista de dicts com chaves: `period`, `agency_key`, `agency_name`,
         `article_count`, `unique_content_count`, `total_mentions`,
         `avg_sentiment_score`.
+
+        Sem a coluna `news.content_key` (antes da 035 ou depois de um rollback
+        dela), o dedup cai na chave por hash exato em vez de falhar.
         """
+        params = (
+            granularity,
+            entity_id,
+            date.fromisoformat(date_from) if date_from else None,
+            date.fromisoformat(date_to) if date_to else None,
+        )
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                _ENTITY_COVERAGE_SQL,
-                granularity,
-                entity_id,
-                date.fromisoformat(date_from) if date_from else None,
-                date.fromisoformat(date_to) if date_to else None,
-            )
+            if not await self._news_has_content_key(conn):
+                rows = await conn.fetch(_ENTITY_COVERAGE_SQL_SEM_CONTENT_KEY, *params)
+                return [dict(r) for r in rows]
+            try:
+                rows = await conn.fetch(_ENTITY_COVERAGE_SQL, *params)
+            except Exception as exc:
+                if getattr(exc, "sqlstate", None) != _UNDEFINED_COLUMN_SQLSTATE:
+                    raise
+                # Coluna removida com o cache dizendo que existe (rollback da
+                # 035): refaz pela chave por hash e guarda que ela não existe.
+                logger.warning("entityCoverage: %s; refazendo com a chave por content_hash", exc)
+                self._content_key_probe = (False, self._clock())
+                rows = await conn.fetch(_ENTITY_COVERAGE_SQL_SEM_CONTENT_KEY, *params)
         return [dict(r) for r in rows]
+
+    async def _news_has_content_key(self, conn) -> bool:
+        """Se `news.content_key` (migração 035 do data-platform) existe.
+
+        Sonda o catálogo no máximo uma vez a cada `_CONTENT_KEY_PROBE_TTL_S`
+        por instância. Desacopla o deploy da API da ordem da migração: antes da
+        035 o entityCoverage usa a chave por hash exato, e a coluna nova entra em
+        uso sozinha depois do TTL."""
+        now = self._clock()
+        cached = self._content_key_probe
+        if cached is not None and now - cached[1] < _CONTENT_KEY_PROBE_TTL_S:
+            return cached[0]
+        exists = bool(await conn.fetchval(_NEWS_HAS_CONTENT_KEY_SQL))
+        if cached is None or cached[0] != exists:
+            logger.info("news.content_key %s", "presente" if exists else "ausente")
+        self._content_key_probe = (exists, now)
+        return exists
 
     async def entity_search(
         self,

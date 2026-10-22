@@ -44,6 +44,9 @@ def _make_mock_pool(fetch_results=None, *, fetchrow=None):
     else:
         conn.fetch = AsyncMock(side_effect=list(fetch_results))
     conn.fetchrow = AsyncMock(return_value=fetchrow)
+    # Sonda de `news.content_key` do entityCoverage: coluna presente (035
+    # aplicada). Sem ela, ver test_postgres_entity_coverage_content_key.py.
+    conn.fetchval = AsyncMock(return_value=True)
 
     acm = AsyncMock()
     acm.__aenter__ = AsyncMock(return_value=conn)
