@@ -150,3 +150,50 @@ class TestGetNewsForTypesense:
         assert result.readability_flesch == 45.2
         assert result.features == features
         conn.fetchrow.assert_awaited_once()
+
+
+class TestNewsRecordContentKey:
+    """`NewsRecord.content_key` é a chave de conteúdo efetiva, com a mesma
+    precedência de `_CONTENT_DEDUP_KEY_SQL`: news.content_key (quase-duplicatas),
+    senão content_hash, senão o próprio unique_id. As leituras usam `n.*`, então
+    antes da migração 035 a coluna nem vem na linha e a chave cai no hash."""
+
+    @pytest.mark.asyncio
+    async def test_usa_content_key_quando_presente(self):
+        row = _sample_row(content_key="news-000", content_hash="abcdef0123456789")
+        pool, _ = _make_mock_pool(fetchrow_result=row)
+        result = await PostgresDatasource(pool).get_news_by_id("news-001")
+        assert result.content_key == "news-000"
+
+    @pytest.mark.asyncio
+    async def test_cai_no_content_hash_sem_content_key(self):
+        row = _sample_row(content_key=None, content_hash="abcdef0123456789")
+        pool, _ = _make_mock_pool(fetchrow_result=row)
+        result = await PostgresDatasource(pool).get_news_by_id("news-001")
+        assert result.content_key == "abcdef0123456789"
+
+    @pytest.mark.asyncio
+    async def test_cai_no_unique_id_sem_chave_nem_hash(self):
+        row = _sample_row(content_key=None, content_hash=None)
+        pool, _ = _make_mock_pool(fetchrow_result=row)
+        result = await PostgresDatasource(pool).get_news_by_id("news-001")
+        assert result.content_key == "news-001"
+
+    @pytest.mark.asyncio
+    async def test_linha_sem_a_coluna_content_key_antes_da_035(self):
+        row = _sample_row(content_hash="abcdef0123456789")
+        assert "content_key" not in row
+        pool, _ = _make_mock_pool(fetchrow_result=row)
+        result = await PostgresDatasource(pool).get_news_by_id("news-001")
+        assert result.content_key == "abcdef0123456789"
+
+    @pytest.mark.asyncio
+    async def test_entity_articles_propaga_a_chave(self):
+        rows = [
+            _sample_row(unique_id="b", content_key="a", total_count=2),
+            _sample_row(unique_id="a", content_key="a", total_count=2),
+        ]
+        pool, _ = _make_mock_pool(fetch_result=rows)
+        records, total = await PostgresDatasource(pool).get_entity_articles("Q1", 10, 0)
+        assert total == 2
+        assert [r.content_key for r in records] == ["a", "a"]

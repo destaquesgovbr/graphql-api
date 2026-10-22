@@ -36,3 +36,8 @@ def test_publication_hour_exposto_no_schema():
     from graphql_api.schema import schema
 
     assert "publicationHour" in schema.as_str()
+
+
+def test_content_key_ausente_por_padrao():
+    # Caminhos do Typesense não têm a chave: o campo fica null.
+    assert _article(None).content_key is None
