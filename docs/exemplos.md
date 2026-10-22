@@ -55,7 +55,8 @@ forma mais rápida de explorar a API.
     !!! note "`filter.themes` faz OR entre níveis"
         Os codes em `themes` casam contra L1 **ou** L2 **ou** L3 — não só o nível
         topo. Use `themeLabel` (label de L1) para filtrar por rótulo legível, e
-        `dedup: true` para agrupar variações do mesmo conteúdo por `content_hash`.
+        `dedup: true` para agrupar variações do mesmo conteúdo por `content_hash`
+        (hash exato; ainda não usa a chave de quase-duplicata `contentKey`).
 
 === "Busca"
 
@@ -139,9 +140,27 @@ forma mais rápida de explorar a API.
     !!! note "Contagens de artigos × de conteúdo"
         `articleCount`/`weight` contam artigos; uma nota republicada por N
         órgãos conta N vezes. `uniqueContentCount`/`uniqueContentWeight` contam
-        conteúdos distintos (`content_hash`). No `entityCoverage`, cada
-        conteúdo é creditado só ao primeiro órgão que o publicou no intervalo,
-        então `uniqueContentCount` pode ser somado entre órgãos e períodos.
+        conteúdos distintos pela chave de conteúdo (`news.content_key`, que
+        agrupa quase-duplicatas; sem ela, `content_hash`). No `entityCoverage`,
+        cada conteúdo é creditado só ao primeiro órgão que o publicou no
+        intervalo, então `uniqueContentCount` pode ser somado entre órgãos e
+        períodos.
+
+    ```graphql
+    query ArtigosDaEntidade($id: String!) {
+      # Postgres: contentKey preenchido; artigos com a mesma chave são
+      # republicações do mesmo conteúdo ("também publicado por …")
+      entityArticles(entityId: $id, limit: 20) {
+        found
+        articles { uniqueId agency publishedAt contentKey }
+      }
+    }
+    ```
+
+    !!! note "`contentKey` só nos caminhos do Postgres"
+        `Article.contentKey` vem preenchido no `entityArticles`. Em
+        `articles`/`search`/`article` (Typesense) ele é `null`, porque o índice
+        ainda não tem a chave.
 
 ## Queries e mutations autenticadas
 
